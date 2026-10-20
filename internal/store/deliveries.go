@@ -14,10 +14,11 @@ import (
 
 // Delivery statuses.
 const (
-	DeliveryPending   = "pending"   // waiting for its next attempt
-	DeliverySucceeded = "succeeded" // receiver accepted it
-	DeliveryDead      = "dead"      // retries exhausted or permanent failure; replayable
-	DeliveryCancelled = "cancelled" // endpoint deleted before delivery finished
+	DeliveryPending    = "pending"    // waiting for its next attempt
+	DeliveryDelivering = "delivering" // claimed by a worker (leased)
+	DeliverySucceeded  = "succeeded"  // receiver accepted it
+	DeliveryDead       = "dead"       // retries exhausted or permanent failure; replayable
+	DeliveryCancelled  = "cancelled"  // endpoint deleted before delivery finished
 )
 
 // ErrNotReplayable is returned when a delivery is not in a state that can be
@@ -136,29 +137,9 @@ type Job struct {
 	EventCreatedAt time.Time
 	EndpointID     string
 	URL            string
-}
-
-// NextDueJob returns the oldest due pending delivery, or ErrNotFound.
-//
-// WALKING SKELETON: this is only safe with exactly one worker. Two workers
-// calling it at the same time would both get the same row. Stage 6 replaces
-// it with a SKIP LOCKED claim.
-func (s *Store) NextDueJob(ctx context.Context) (Job, error) {
-	var j Job
-	err := s.pool.QueryRow(ctx, `
-		SELECT d.id, d.attempt_count + 1, d.attempt_count + 1 - d.attempt_offset,
-		       e.id, e.event_type, e.payload, e.created_at, ep.id, ep.url
-		FROM deliveries d
-		JOIN events e     ON e.id = d.event_id
-		JOIN endpoints ep ON ep.id = d.endpoint_id
-		WHERE d.status = 'pending'
-		  AND d.next_attempt_at <= now()
-		  AND ep.status = 'active'
-		  AND ep.deleted_at IS NULL
-		ORDER BY d.next_attempt_at, d.id
-		LIMIT 1`).Scan(&j.DeliveryID, &j.AttemptNumber, &j.RetryAttempt, &j.EventID, &j.EventType, &j.Payload,
-		&j.EventCreatedAt, &j.EndpointID, &j.URL)
-	return j, notFoundIfNoRows(err)
+	// LeaseToken proves this worker still owns the delivery when it records
+	// the result (see RecordAttempt).
+	LeaseToken string
 }
 
 // AttemptResult is what happened when a worker sent a job.
@@ -197,8 +178,9 @@ type AttemptRecord struct {
 
 // RecordResult reports side effects of RecordAttempt.
 type RecordResult struct {
-	// Applied is false when the delivery changed underneath us (e.g. it was
-	// cancelled because its endpoint was deleted while we were sending).
+	// Applied is false when we no longer own the delivery: our lease
+	// expired and the reaper (or another worker) took over, or it was
+	// cancelled because its endpoint was deleted while we were sending.
 	// The attempt is still logged.
 	Applied bool
 	// EndpointDisabled is true when this attempt tipped the endpoint over
@@ -237,12 +219,15 @@ func (s *Store) RecordAttempt(ctx context.Context, rec AttemptRecord) (RecordRes
 			res.Duration.Milliseconds()); err != nil {
 			return err
 		}
-		// "AND status = 'pending'" makes this a no-op if the delivery was
-		// cancelled while the HTTP request was in flight.
+		// Fencing: only the holder of the current lease may change the
+		// delivery. If our lease expired and someone else claimed it, or it
+		// was cancelled, this matches zero rows and we change nothing.
 		tag, err := tx.Exec(ctx, `
 			UPDATE deliveries SET
 				status           = $2,
-				attempt_count    = $3,
+				locked_by        = NULL,
+				lease_token      = NULL,
+				locked_until     = NULL,
 				last_attempt_at  = now(),
 				last_status_code = $4,
 				last_error       = $5,
@@ -250,8 +235,8 @@ func (s *Store) RecordAttempt(ctx context.Context, rec AttemptRecord) (RecordRes
 				                        THEN now() + make_interval(secs => $6)
 				                        ELSE next_attempt_at END,
 				completed_at     = CASE WHEN $2 = 'pending' THEN NULL ELSE now() END
-			WHERE id = $1 AND status = 'pending'`,
-			job.DeliveryID, status, job.AttemptNumber, nullIfZero(res.StatusCode), nullIfEmpty(res.Error),
+			WHERE id = $1 AND status = 'delivering' AND lease_token = $3`,
+			job.DeliveryID, status, job.LeaseToken, nullIfZero(res.StatusCode), nullIfEmpty(res.Error),
 			rec.RetryIn.Seconds())
 		if err != nil {
 			return err
@@ -329,6 +314,9 @@ func (s *Store) ReplayDelivery(ctx context.Context, deliveryID string) (Delivery
 		}
 		return Delivery{}, ErrNotReplayable
 	}
+	if err == nil {
+		s.notifyWork(ctx)
+	}
 	return d, err
 }
 
@@ -361,6 +349,9 @@ func (s *Store) ReplayDeadForEndpoint(ctx context.Context, endpointID string, si
 		}
 		n := int(tag.RowsAffected())
 		total += n
+		if n > 0 {
+			s.notifyWork(ctx)
+		}
 		if n < batchSize {
 			return total, nil
 		}

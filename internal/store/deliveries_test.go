@@ -10,14 +10,23 @@ import (
 	"github.com/GarineSaiAjay/webevent/internal/store"
 )
 
+func claimOne(t *testing.T, st *store.Store, ctx context.Context) store.Job {
+	t.Helper()
+	jobs, err := st.ClaimJobs(ctx, "test-worker", 1, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("claimed %d jobs, want 1", len(jobs))
+	}
+	return jobs[0]
+}
+
 // killDelivery drives a delivery to the dead state through the public API,
 // the same way a worker would after exhausting retries.
 func killDelivery(t *testing.T, st *store.Store, ctx context.Context) store.Delivery {
 	t.Helper()
-	job, err := st.NextDueJob(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	job := claimOne(t, st, ctx)
 	rr, err := st.RecordAttempt(ctx, store.AttemptRecord{
 		Job:     job,
 		Result:  store.AttemptResult{StatusCode: 500, Error: "boom", Duration: time.Millisecond},
@@ -58,10 +67,7 @@ func TestReplayDelivery(t *testing.T) {
 	if replayed.Status != store.DeliveryPending || replayed.ReplayCount != 1 || replayed.CompletedAt != nil {
 		t.Fatalf("replayed = %+v", replayed)
 	}
-	job, err := st.NextDueJob(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	job := claimOne(t, st, ctx)
 	if job.AttemptNumber != 2 || job.RetryAttempt != 1 {
 		t.Fatalf("job after replay: attempt %d retry %d, want 2/1", job.AttemptNumber, job.RetryAttempt)
 	}
@@ -105,8 +111,8 @@ func TestDeleteEndpointCancelsPending(t *testing.T) {
 			t.Fatalf("delivery not cancelled: %+v", d)
 		}
 	}
-	if _, err := st.NextDueJob(ctx); !errors.Is(err, store.ErrNotFound) {
-		t.Fatal("cancelled deliveries must not be picked up")
+	if jobs, err := st.ClaimJobs(ctx, "w", 10, time.Minute); err != nil || len(jobs) != 0 {
+		t.Fatalf("cancelled deliveries must not be claimed: %v %v", jobs, err)
 	}
 }
 

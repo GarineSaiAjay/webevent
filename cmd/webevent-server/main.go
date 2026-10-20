@@ -98,22 +98,32 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 
 	st := store.New(pool)
 
-	// The delivery worker runs until ctx is cancelled (SIGINT/SIGTERM).
-	sender := delivery.NewSender(cfg.DeliveryTimeout, "webevent/"+version)
-	policy := delivery.RetryPolicy{MaxAttempts: cfg.MaxAttempts, BaseDelay: cfg.RetryBaseDelay, MaxDelay: cfg.RetryMaxDelay}
-	worker := delivery.NewWorker(delivery.WorkerOptions{
-		Store:                st,
-		Sender:               sender,
-		Policy:               policy,
-		Logger:               log.With("component", "worker"),
-		PollInterval:         cfg.WorkerPollInterval,
-		DisableEndpointAfter: cfg.EndpointDisableAfter,
-	})
+	// Delivery workers run until ctx is cancelled (SIGINT/SIGTERM), then
+	// drain in-flight deliveries. API-only replicas set WEBEVENT_WORKER_ENABLED=false.
 	workerDone := make(chan struct{})
-	go func() {
-		defer close(workerDone)
-		worker.Run(ctx)
-	}()
+	if cfg.WorkerEnabled {
+		workers, err := delivery.NewPool(delivery.PoolOptions{
+			Store:                st,
+			Sender:               delivery.NewSender(cfg.DeliveryTimeout, "webevent/"+version),
+			Policy:               delivery.RetryPolicy{MaxAttempts: cfg.MaxAttempts, BaseDelay: cfg.RetryBaseDelay, MaxDelay: cfg.RetryMaxDelay},
+			Logger:               log.With("component", "delivery"),
+			Concurrency:          cfg.WorkerConcurrency,
+			PollInterval:         cfg.WorkerPollInterval,
+			LeaseDuration:        cfg.LeaseDuration,
+			ReapInterval:         cfg.ReapInterval,
+			DisableEndpointAfter: cfg.EndpointDisableAfter,
+			Wake:                 delivery.Listen(ctx, pool, log.With("component", "listener")),
+		})
+		if err != nil {
+			return err
+		}
+		go func() {
+			defer close(workerDone)
+			workers.Run(ctx)
+		}()
+	} else {
+		close(workerDone)
+	}
 
 	handler := api.New(api.Options{Logger: log, Store: st, APIKeys: cfg.APIKeys, Version: version})
 	srv := &http.Server{
@@ -150,7 +160,7 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	select {
 	case <-workerDone:
 	case <-shutdownCtx.Done():
-		return errors.New("timed out waiting for the delivery worker to stop")
+		return errors.New("timed out waiting for in-flight deliveries to finish")
 	}
 	log.Info("shutdown complete")
 	return nil

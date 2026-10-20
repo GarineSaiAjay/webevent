@@ -68,13 +68,13 @@ func TestOverrides(t *testing.T) {
 		"WEBEVENT_LOG_LEVEL":        "debug",
 		"WEBEVENT_LOG_FORMAT":       "text",
 		"WEBEVENT_AUTO_MIGRATE":     "false",
-		"WEBEVENT_SHUTDOWN_TIMEOUT": "5s",
+		"WEBEVENT_SHUTDOWN_TIMEOUT": "45s",
 	}))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if cfg.HTTPAddr != "127.0.0.1:9000" || cfg.DBMaxConns != 50 || cfg.LogLevel != slog.LevelDebug ||
-		cfg.LogFormat != "text" || cfg.AutoMigrate || cfg.ShutdownTimeout != 5*time.Second {
+		cfg.LogFormat != "text" || cfg.AutoMigrate || cfg.ShutdownTimeout != 45*time.Second {
 		t.Fatalf("overrides not applied: %+v", cfg)
 	}
 }
@@ -161,5 +161,27 @@ func TestRetrySettings(t *testing.T) {
 	}))
 	if err == nil || !strings.Contains(err.Error(), "WEBEVENT_RETRY_MAX_DELAY") || !strings.Contains(err.Error(), "WEBEVENT_MAX_ATTEMPTS") {
 		t.Fatalf("expected retry validation errors, got %v", err)
+	}
+}
+
+func TestLeaseMustOutliveDeliveryTimeout(t *testing.T) {
+	_, err := FromLookup(lookupFrom(map[string]string{
+		"WEBEVENT_DATABASE_URL":     "postgres://db/x",
+		"WEBEVENT_DELIVERY_TIMEOUT": "30s",
+		"WEBEVENT_LEASE_DURATION":   "40s",
+		"WEBEVENT_SHUTDOWN_TIMEOUT": "60s",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "WEBEVENT_LEASE_DURATION") {
+		t.Fatalf("expected lease validation error, got %v", err)
+	}
+}
+
+func TestShutdownMustOutliveDeliveryTimeout(t *testing.T) {
+	_, err := FromLookup(lookupFrom(map[string]string{
+		"WEBEVENT_DATABASE_URL":     "postgres://db/x",
+		"WEBEVENT_SHUTDOWN_TIMEOUT": "10s",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "WEBEVENT_SHUTDOWN_TIMEOUT") {
+		t.Fatalf("expected shutdown validation error, got %v", err)
 	}
 }

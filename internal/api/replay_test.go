@@ -12,10 +12,11 @@ import (
 func deadDelivery(t *testing.T, a *testAPI) store.Delivery {
 	t.Helper()
 	ctx := context.Background()
-	job, err := a.store.NextDueJob(ctx)
-	if err != nil {
-		t.Fatal(err)
+	jobs, err := a.store.ClaimJobs(ctx, "test", 1, time.Minute)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("claim: %v %v", jobs, err)
 	}
+	job := jobs[0]
 	if _, err := a.store.RecordAttempt(ctx, store.AttemptRecord{
 		Job: job, Result: store.AttemptResult{StatusCode: 500, Error: "x"}, Outcome: store.OutcomeDead,
 	}); err != nil {
