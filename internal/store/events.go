@@ -102,6 +102,7 @@ func (s *Store) CreateEvent(ctx context.Context, in NewEvent) (CreateEventResult
 		rows, err = tx.Query(ctx, `
 			SELECT id FROM endpoints
 			WHERE deleted_at IS NULL
+			  AND status IN ('active', 'paused')
 			  AND event_types && ARRAY[$1, '*']::text[]
 			ORDER BY id
 			FOR SHARE`, in.EventType)

@@ -64,8 +64,20 @@ func fastPolicy(maxAttempts int) delivery.RetryPolicy {
 
 func setup(t *testing.T, policy delivery.RetryPolicy) (*store.Store, *delivery.Worker) {
 	t.Helper()
+	return setupWith(t, policy, 0)
+}
+
+func setupWith(t *testing.T, policy delivery.RetryPolicy, disableAfter int) (*store.Store, *delivery.Worker) {
+	t.Helper()
 	st := store.New(testutil.NewDB(t))
-	w := delivery.NewWorker(st, delivery.NewSender(5*time.Second, "webevent-test"), policy, logging.Discard(), 10*time.Millisecond)
+	w := delivery.NewWorker(delivery.WorkerOptions{
+		Store:                st,
+		Sender:               delivery.NewSender(5*time.Second, "webevent-test"),
+		Policy:               policy,
+		Logger:               logging.Discard(),
+		PollInterval:         10 * time.Millisecond,
+		DisableEndpointAfter: disableAfter,
+	})
 	return st, w
 }
 
@@ -208,7 +220,7 @@ func TestGivesUpAfterMaxAttempts(t *testing.T) {
 	seed(t, st, srv.URL)
 
 	d := drain(t, st, w)
-	if d.Status != store.DeliveryFailed || d.AttemptCount != 3 || rcv.count() != 3 || d.CompletedAt == nil {
+	if d.Status != store.DeliveryDead || d.AttemptCount != 3 || rcv.count() != 3 || d.CompletedAt == nil {
 		t.Fatalf("delivery = %+v, receiver saw %d", d, rcv.count())
 	}
 }
@@ -219,7 +231,7 @@ func TestGoneStopsImmediately(t *testing.T) {
 	seed(t, st, srv.URL)
 
 	d := drain(t, st, w)
-	if d.Status != store.DeliveryFailed || d.AttemptCount != 1 || rcv.count() != 1 {
+	if d.Status != store.DeliveryDead || d.AttemptCount != 1 || rcv.count() != 1 {
 		t.Fatalf("410 must not be retried: %+v", d)
 	}
 }
@@ -249,7 +261,7 @@ func TestConnectionErrorIsRetried(t *testing.T) {
 	seed(t, st, url)
 
 	d := drain(t, st, w)
-	if d.Status != store.DeliveryFailed || d.AttemptCount != 2 || d.LastStatusCode != nil ||
+	if d.Status != store.DeliveryDead || d.AttemptCount != 2 || d.LastStatusCode != nil ||
 		d.LastError == nil || !strings.Contains(*d.LastError, "connect") {
 		t.Fatalf("delivery = %+v", d)
 	}
@@ -290,5 +302,130 @@ func TestRunStopsOnCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("worker did not stop after cancel")
+	}
+}
+
+func TestReplayRestartsRetryBudget(t *testing.T) {
+	st, w := setup(t, fastPolicy(2))
+	ctx := context.Background()
+	rcv, srv := newReceiver(t, 500, 500, 200)
+	seed(t, st, srv.URL)
+
+	dead := drain(t, st, w)
+	if dead.Status != store.DeliveryDead || dead.AttemptCount != 2 {
+		t.Fatalf("expected dead after 2 attempts, got %+v", dead)
+	}
+
+	if _, err := st.ReplayDelivery(ctx, dead.ID); err != nil {
+		t.Fatal(err)
+	}
+	d := drain(t, st, w)
+	if d.Status != store.DeliverySucceeded || d.AttemptCount != 3 || d.ReplayCount != 1 || rcv.count() != 3 {
+		t.Fatalf("after replay: %+v (receiver saw %d)", d, rcv.count())
+	}
+	attempts, _ := st.ListAttempts(ctx, d.ID)
+	if len(attempts) != 3 || attempts[2].AttemptNumber != 3 {
+		t.Fatalf("attempt log must continue numbering across replays: %+v", attempts)
+	}
+}
+
+func TestEndpointAutoDisabled(t *testing.T) {
+	st, w := setupWith(t, fastPolicy(1), 2)
+	ctx := context.Background()
+	rcv, srv := newReceiver(t, http.StatusInternalServerError)
+	ep, _ := st.CreateEndpoint(ctx, store.NewEndpoint{URL: srv.URL, EventTypes: []string{"*"}})
+	for i := 0; i < 3; i++ {
+		if _, err := st.CreateEvent(ctx, store.NewEvent{EventType: "a.b", Payload: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := w.ProcessOne(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := st.GetEndpoint(ctx, ep.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.EndpointDisabled || got.DisabledReason == nil || got.ConsecutiveFailures != 2 {
+		t.Fatalf("endpoint = %+v", got)
+	}
+	// The third delivery is still pending, parked until the endpoint is re-enabled.
+	if rcv.count() != 2 {
+		t.Fatalf("receiver saw %d requests, want 2", rcv.count())
+	}
+	pending, _, _ := st.ListDeliveries(ctx, store.DeliveryFilter{Status: store.DeliveryPending}, store.Page{})
+	if len(pending) != 1 {
+		t.Fatalf("want 1 parked delivery, got %d", len(pending))
+	}
+
+	// Disabled endpoints get no new deliveries.
+	res, _ := st.CreateEvent(ctx, store.NewEvent{EventType: "a.b", Payload: json.RawMessage(`{}`)})
+	if res.DeliveryCount != 0 {
+		t.Fatal("disabled endpoint must not receive new deliveries")
+	}
+
+	// Re-enabling resets the counter and resumes the parked delivery.
+	active := store.EndpointActive
+	got, err = st.UpdateEndpoint(ctx, ep.ID, store.EndpointPatch{Status: &active})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ConsecutiveFailures != 0 || got.DisabledReason != nil {
+		t.Fatalf("re-enabled endpoint = %+v", got)
+	}
+	if did, _ := w.ProcessOne(ctx); !did {
+		t.Fatal("parked delivery should run after re-enabling")
+	}
+}
+
+func TestSuccessResetsFailureCounter(t *testing.T) {
+	st, w := setupWith(t, fastPolicy(1), 5)
+	ctx := context.Background()
+	_, srv := newReceiver(t, 500, 200)
+	ep, _ := st.CreateEndpoint(ctx, store.NewEndpoint{URL: srv.URL, EventTypes: []string{"*"}})
+	for i := 0; i < 2; i++ {
+		if _, err := st.CreateEvent(ctx, store.NewEvent{EventType: "a.b", Payload: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.ProcessOne(ctx); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := st.GetEndpoint(ctx, ep.ID)
+		if want := 1 - i; got.ConsecutiveFailures != want {
+			t.Fatalf("after delivery %d: consecutive_failures = %d, want %d", i+1, got.ConsecutiveFailures, want)
+		}
+	}
+}
+
+func TestDeleteDuringFlightIsNotOverwritten(t *testing.T) {
+	st, w := setup(t, fastPolicy(3))
+	ctx := context.Background()
+
+	var epID string
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		// The endpoint is deleted while its request is in flight.
+		if err := st.DeleteEndpoint(context.Background(), epID); err != nil {
+			t.Errorf("delete: %v", err)
+		}
+		rw.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	ep, _ := st.CreateEndpoint(ctx, store.NewEndpoint{URL: srv.URL, EventTypes: []string{"*"}})
+	epID = ep.ID
+	if _, err := st.CreateEvent(ctx, store.NewEvent{EventType: "a.b", Payload: json.RawMessage(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.ProcessOne(ctx); err != nil {
+		t.Fatal(err)
+	}
+	d := onlyDelivery(t, st)
+	if d.Status != store.DeliveryCancelled {
+		t.Fatalf("status = %s, want cancelled to stick", d.Status)
+	}
+	attempts, _ := st.ListAttempts(ctx, d.ID)
+	if len(attempts) != 1 {
+		t.Fatal("the attempt must still be logged")
 	}
 }

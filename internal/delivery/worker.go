@@ -17,11 +17,27 @@ type Worker struct {
 	policy       RetryPolicy
 	log          *slog.Logger
 	pollInterval time.Duration
+	disableAfter int
+}
+
+// WorkerOptions configures a Worker.
+type WorkerOptions struct {
+	Store        *store.Store
+	Sender       *Sender
+	Policy       RetryPolicy
+	Logger       *slog.Logger
+	PollInterval time.Duration
+	// DisableEndpointAfter disables an endpoint after this many consecutive
+	// dead deliveries (0 = never).
+	DisableEndpointAfter int
 }
 
 // NewWorker builds a Worker.
-func NewWorker(st *store.Store, sender *Sender, policy RetryPolicy, log *slog.Logger, pollInterval time.Duration) *Worker {
-	return &Worker{store: st, sender: sender, policy: policy, log: log, pollInterval: pollInterval}
+func NewWorker(o WorkerOptions) *Worker {
+	return &Worker{
+		store: o.Store, sender: o.Sender, policy: o.Policy, log: o.Logger,
+		pollInterval: o.PollInterval, disableAfter: o.DisableEndpointAfter,
+	}
 }
 
 // Run processes deliveries until ctx is cancelled.
@@ -59,25 +75,35 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	}
 
 	res := w.sender.Send(ctx, job)
-	dec := w.policy.Decide(job.AttemptNumber, res)
+	dec := w.policy.Decide(job.RetryAttempt, res)
 
 	// Record with a context that survives shutdown: the HTTP request already
 	// happened, and forgetting its outcome would cause a duplicate delivery.
 	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	if err := w.store.RecordAttempt(recordCtx, job, res, dec.Outcome, dec.Delay); err != nil {
+	rr, err := w.store.RecordAttempt(recordCtx, store.AttemptRecord{
+		Job: job, Result: res, Outcome: dec.Outcome, RetryIn: dec.Delay, DisableEndpointAfter: w.disableAfter,
+	})
+	if err != nil {
 		return true, err
 	}
 
 	log := w.log.With("delivery_id", job.DeliveryID, "event_id", job.EventID, "endpoint_id", job.EndpointID,
 		"attempt", job.AttemptNumber, "status_code", res.StatusCode, "duration_ms", res.Duration.Milliseconds())
+	if !rr.Applied {
+		log.Warn("delivery changed while in flight (endpoint deleted?); attempt logged, state left as is")
+		return true, nil
+	}
 	switch dec.Outcome {
 	case store.OutcomeSucceeded:
 		log.Info("delivery succeeded")
 	case store.OutcomeRetry:
 		log.Warn("delivery attempt failed; will retry", "err", res.Error, "retry_in", dec.Delay.Round(time.Millisecond))
-	case store.OutcomeFailed:
-		log.Error("delivery failed permanently", "err", res.Error, "reason", dec.Reason)
+	case store.OutcomeDead:
+		log.Error("delivery dead-lettered", "err", res.Error, "reason", dec.Reason)
+	}
+	if rr.EndpointDisabled {
+		log.Error("endpoint disabled after repeated dead deliveries", "threshold", w.disableAfter)
 	}
 	return true, nil
 }

@@ -49,14 +49,14 @@ func (p RetryPolicy) Decide(attempt int, res store.AttemptResult) Decision {
 		return Decision{Outcome: store.OutcomeSucceeded}
 	}
 	if res.Permanent {
-		return Decision{Outcome: store.OutcomeFailed, Reason: "permanent failure: " + res.Error}
+		return Decision{Outcome: store.OutcomeDead, Reason: "permanent failure: " + res.Error}
 	}
 	// 410 Gone is the receiver telling us, explicitly, to stop.
 	if res.StatusCode == http.StatusGone {
-		return Decision{Outcome: store.OutcomeFailed, Reason: "receiver returned 410 Gone"}
+		return Decision{Outcome: store.OutcomeDead, Reason: "receiver returned 410 Gone"}
 	}
 	if attempt >= p.MaxAttempts {
-		return Decision{Outcome: store.OutcomeFailed, Reason: "gave up after " + strconv.Itoa(attempt) + " attempts"}
+		return Decision{Outcome: store.OutcomeDead, Reason: "gave up after " + strconv.Itoa(attempt) + " attempts"}
 	}
 	d := p.Backoff(attempt)
 	// Respect Retry-After when the receiver asks for more time than we

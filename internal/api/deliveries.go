@@ -11,7 +11,8 @@ import (
 var validDeliveryStatuses = map[string]bool{
 	store.DeliveryPending:   true,
 	store.DeliverySucceeded: true,
-	store.DeliveryFailed:    true,
+	store.DeliveryDead:      true,
+	store.DeliveryCancelled: true,
 }
 
 func (s *Server) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
@@ -63,4 +64,26 @@ func (s *Server) handleGetDelivery(w http.ResponseWriter, r *http.Request) {
 		attempts = []store.Attempt{}
 	}
 	writeJSON(w, http.StatusOK, deliveryResponse{Delivery: d, Attempts: attempts})
+}
+
+// handleReplayDelivery puts a dead (or succeeded) delivery back in the queue
+// with a fresh retry budget. Its attempt history is kept.
+func (s *Server) handleReplayDelivery(w http.ResponseWriter, r *http.Request) {
+	dID := r.PathValue("id")
+	if !id.Valid(id.PrefixDelivery, dID) {
+		writeError(w, r, s.log, errNotFound("delivery"))
+		return
+	}
+	d, err := s.store.ReplayDelivery(r.Context(), dID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		err = errNotFound("delivery")
+	case errors.Is(err, store.ErrNotReplayable):
+		err = errConflict("only dead or succeeded deliveries can be replayed")
+	}
+	if err != nil {
+		writeError(w, r, s.log, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, d)
 }

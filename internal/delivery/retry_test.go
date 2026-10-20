@@ -64,9 +64,9 @@ func TestDecide(t *testing.T) {
 		{"500 retries", 1, store.AttemptResult{StatusCode: 500, Error: "x"}, store.OutcomeRetry, 500 * time.Millisecond},
 		{"404 retries", 2, store.AttemptResult{StatusCode: 404, Error: "x"}, store.OutcomeRetry, time.Second},
 		{"network retries", 1, store.AttemptResult{Error: "connection refused"}, store.OutcomeRetry, 500 * time.Millisecond},
-		{"exhausted", 3, store.AttemptResult{StatusCode: 500, Error: "x"}, store.OutcomeFailed, 0},
-		{"410 is final", 1, store.AttemptResult{StatusCode: 410, Error: "x"}, store.OutcomeFailed, 0},
-		{"permanent", 1, store.AttemptResult{Error: "bad url", Permanent: true}, store.OutcomeFailed, 0},
+		{"exhausted", 3, store.AttemptResult{StatusCode: 500, Error: "x"}, store.OutcomeDead, 0},
+		{"410 is final", 1, store.AttemptResult{StatusCode: 410, Error: "x"}, store.OutcomeDead, 0},
+		{"permanent", 1, store.AttemptResult{Error: "bad url", Permanent: true}, store.OutcomeDead, 0},
 		{"retry-after honoured", 1, store.AttemptResult{StatusCode: 429, Error: "x", RetryAfter: 30 * time.Second}, store.OutcomeRetry, 30 * time.Second},
 		{"retry-after capped", 1, store.AttemptResult{StatusCode: 503, Error: "x", RetryAfter: time.Hour}, store.OutcomeRetry, time.Minute},
 		{"short retry-after ignored", 2, store.AttemptResult{StatusCode: 429, Error: "x", RetryAfter: time.Millisecond}, store.OutcomeRetry, time.Second},
@@ -80,8 +80,8 @@ func TestDecide(t *testing.T) {
 			if tc.want == store.OutcomeRetry && d.Delay != tc.delay {
 				t.Fatalf("delay = %v, want %v", d.Delay, tc.delay)
 			}
-			if tc.want == store.OutcomeFailed && d.Reason == "" {
-				t.Fatal("failed decisions must carry a reason")
+			if tc.want == store.OutcomeDead && d.Reason == "" {
+				t.Fatal("dead decisions must carry a reason")
 			}
 		})
 	}

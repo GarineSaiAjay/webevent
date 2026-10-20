@@ -32,6 +32,9 @@ type Config struct {
 	MaxAttempts    int
 	RetryBaseDelay time.Duration
 	RetryMaxDelay  time.Duration
+
+	// Dead letters
+	EndpointDisableAfter int
 }
 
 // Load reads configuration from the process environment.
@@ -59,6 +62,8 @@ func FromLookup(lookup func(string) (string, bool)) (Config, error) {
 		MaxAttempts:    r.int("WEBEVENT_MAX_ATTEMPTS", 15),
 		RetryBaseDelay: r.duration("WEBEVENT_RETRY_BASE_DELAY", 10*time.Second),
 		RetryMaxDelay:  r.duration("WEBEVENT_RETRY_MAX_DELAY", 6*time.Hour),
+
+		EndpointDisableAfter: r.int("WEBEVENT_ENDPOINT_DISABLE_AFTER", 10),
 	}
 	if err := errors.Join(r.errs...); err != nil {
 		return Config{}, err
@@ -98,6 +103,9 @@ func (c Config) Validate() error {
 	}
 	if c.RetryMaxDelay < c.RetryBaseDelay {
 		errs = append(errs, errors.New("WEBEVENT_RETRY_MAX_DELAY must be >= WEBEVENT_RETRY_BASE_DELAY"))
+	}
+	if c.EndpointDisableAfter < 0 {
+		errs = append(errs, errors.New("WEBEVENT_ENDPOINT_DISABLE_AFTER must be >= 0 (0 disables auto-disabling)"))
 	}
 	if len(c.APIKeys) == 0 {
 		errs = append(errs, errors.New("WEBEVENT_API_KEYS is required (comma-separated list of keys)"))
