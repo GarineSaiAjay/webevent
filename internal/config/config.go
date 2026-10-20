@@ -22,6 +22,7 @@ type Config struct {
 	LogFormat       string // "json" or "text"
 	AutoMigrate     bool
 	ShutdownTimeout time.Duration
+	APIKeys         []string
 }
 
 // Load reads configuration from the process environment.
@@ -41,6 +42,7 @@ func FromLookup(lookup func(string) (string, bool)) (Config, error) {
 		LogFormat:       r.str("WEBEVENT_LOG_FORMAT", "json"),
 		AutoMigrate:     r.bool("WEBEVENT_AUTO_MIGRATE", true),
 		ShutdownTimeout: r.duration("WEBEVENT_SHUTDOWN_TIMEOUT", 30*time.Second),
+		APIKeys:         r.list("WEBEVENT_API_KEYS"),
 	}
 	if err := errors.Join(r.errs...); err != nil {
 		return Config{}, err
@@ -65,6 +67,14 @@ func (c Config) Validate() error {
 	}
 	if c.ShutdownTimeout <= 0 {
 		errs = append(errs, errors.New("WEBEVENT_SHUTDOWN_TIMEOUT must be positive"))
+	}
+	if len(c.APIKeys) == 0 {
+		errs = append(errs, errors.New("WEBEVENT_API_KEYS is required (comma-separated list of keys)"))
+	}
+	for i, k := range c.APIKeys {
+		if len(k) < 32 {
+			errs = append(errs, fmt.Errorf("WEBEVENT_API_KEYS entry %d is shorter than 32 characters", i+1))
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -127,6 +137,20 @@ func (r *reader) duration(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+func (r *reader) list(key string) []string {
+	v, ok := r.raw(key)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func (r *reader) level(key string, def slog.Level) slog.Level {

@@ -23,6 +23,7 @@ import (
 	"github.com/GarineSaiAjay/webevent/internal/config"
 	"github.com/GarineSaiAjay/webevent/internal/db"
 	"github.com/GarineSaiAjay/webevent/internal/logging"
+	"github.com/GarineSaiAjay/webevent/internal/store"
 )
 
 // version is overridden at build time: -ldflags "-X main.version=v1.2.3".
@@ -95,8 +96,13 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	}
 
 	srv := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           api.New(api.Options{Logger: log, Pool: pool, Version: version}),
+		Addr: cfg.HTTPAddr,
+		Handler: api.New(api.Options{
+			Logger:  log,
+			Store:   store.New(pool),
+			APIKeys: cfg.APIKeys,
+			Version: version,
+		}),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
