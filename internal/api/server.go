@@ -47,11 +47,13 @@ func New(opts Options) http.Handler {
 	v1.HandleFunc("GET /v1/endpoints/{id}", s.handleGetEndpoint)
 	v1.HandleFunc("PATCH /v1/endpoints/{id}", s.handleUpdateEndpoint)
 	v1.HandleFunc("DELETE /v1/endpoints/{id}", s.handleDeleteEndpoint)
+	v1.HandleFunc("POST /v1/endpoints/{id}/replay", s.handleReplayEndpoint)
 	v1.HandleFunc("POST /v1/events", s.handleCreateEvent)
 	v1.HandleFunc("GET /v1/events", s.handleListEvents)
 	v1.HandleFunc("GET /v1/events/{id}", s.handleGetEvent)
 	v1.HandleFunc("GET /v1/deliveries", s.handleListDeliveries)
 	v1.HandleFunc("GET /v1/deliveries/{id}", s.handleGetDelivery)
+	v1.HandleFunc("POST /v1/deliveries/{id}/replay", s.handleReplayDelivery)
 	v1.HandleFunc("/v1/", s.handleNoRoute)
 	mux.Handle("/v1/", s.requireAPIKey(v1))
 

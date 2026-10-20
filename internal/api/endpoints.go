@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/GarineSaiAjay/webevent/internal/id"
 	"github.com/GarineSaiAjay/webevent/internal/store"
@@ -148,4 +149,51 @@ func (s *Server) handleDeleteEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type replayRequest struct {
+	Since *time.Time `json:"since"`
+	Until *time.Time `json:"until"`
+}
+
+// replayBatchSize bounds each UPDATE issued by a bulk replay.
+const replayBatchSize = 1000
+
+// handleReplayEndpoint re-queues every dead delivery of an endpoint that
+// died in [since, until). since defaults to 7 days ago, until to now.
+func (s *Server) handleReplayEndpoint(w http.ResponseWriter, r *http.Request) {
+	epID := r.PathValue("id")
+	if !id.Valid(id.PrefixEndpoint, epID) {
+		writeError(w, r, s.log, errNotFound("endpoint"))
+		return
+	}
+	var req replayRequest
+	if r.ContentLength != 0 {
+		if err := decodeJSON(w, r, &req); err != nil {
+			writeError(w, r, s.log, err)
+			return
+		}
+	}
+	now := time.Now()
+	since, until := now.Add(-7*24*time.Hour), now
+	if req.Since != nil {
+		since = *req.Since
+	}
+	if req.Until != nil {
+		until = *req.Until
+	}
+	if !since.Before(until) {
+		writeError(w, r, s.log, errValidation(map[string]string{"since": "must be before until"}))
+		return
+	}
+
+	n, err := s.store.ReplayDeadForEndpoint(r.Context(), epID, since, until, replayBatchSize)
+	if errors.Is(err, store.ErrNotFound) {
+		err = errNotFound("endpoint")
+	}
+	if err != nil {
+		writeError(w, r, s.log, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"replayed": n, "since": since.UTC(), "until": until.UTC()})
 }
