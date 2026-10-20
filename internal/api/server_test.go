@@ -8,6 +8,7 @@ import (
 
 	"github.com/GarineSaiAjay/webevent/internal/api"
 	"github.com/GarineSaiAjay/webevent/internal/logging"
+	"github.com/GarineSaiAjay/webevent/internal/store"
 	"github.com/GarineSaiAjay/webevent/internal/testutil"
 )
 
@@ -71,7 +72,7 @@ func TestUnknownRouteReturnsJSON404(t *testing.T) {
 
 func TestReadyzWithDatabase(t *testing.T) {
 	pool := testutil.NewDB(t)
-	h := api.New(api.Options{Logger: logging.Discard(), Pool: pool})
+	h := api.New(api.Options{Logger: logging.Discard(), Store: store.New(pool)})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if rec.Code != http.StatusOK {

@@ -7,35 +7,56 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/GarineSaiAjay/webevent/internal/store"
 )
 
 // Options are the dependencies of the API server.
 type Options struct {
 	Logger  *slog.Logger
-	Pool    *pgxpool.Pool
+	Store   *store.Store
+	APIKeys []string
 	Version string
 }
 
 // Server holds handler dependencies.
 type Server struct {
 	log     *slog.Logger
-	pool    *pgxpool.Pool
+	store   *store.Store
+	auth    *apiKeyAuth
 	version string
 }
 
 // New builds the API and returns its root handler.
 func New(opts Options) http.Handler {
-	s := &Server{log: opts.Logger, pool: opts.Pool, version: opts.Version}
+	s := &Server{
+		log:     opts.Logger,
+		store:   opts.Store,
+		auth:    newAPIKeyAuth(opts.APIKeys),
+		version: opts.Version,
+	}
 
+	// Unauthenticated operational routes.
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, r, s.log, &Error{Status: http.StatusNotFound, Code: "not_found", Message: "no such route"})
-	})
+
+	// Authenticated public API, versioned under /v1.
+	v1 := http.NewServeMux()
+	v1.HandleFunc("POST /v1/endpoints", s.handleCreateEndpoint)
+	v1.HandleFunc("GET /v1/endpoints", s.handleListEndpoints)
+	v1.HandleFunc("GET /v1/endpoints/{id}", s.handleGetEndpoint)
+	v1.HandleFunc("PATCH /v1/endpoints/{id}", s.handleUpdateEndpoint)
+	v1.HandleFunc("DELETE /v1/endpoints/{id}", s.handleDeleteEndpoint)
+	v1.HandleFunc("/v1/", s.handleNoRoute)
+	mux.Handle("/v1/", s.requireAPIKey(v1))
+
+	mux.HandleFunc("/", s.handleNoRoute)
 
 	return chain(mux, requestID, recoverer(s.log), accessLog(s.log))
+}
+
+func (s *Server) handleNoRoute(w http.ResponseWriter, r *http.Request) {
+	writeError(w, r, s.log, &Error{Status: http.StatusNotFound, Code: "not_found", Message: "no such route"})
 }
 
 // handleHealthz is a liveness probe: the process is up and serving HTTP.
@@ -48,7 +69,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	if err := s.pool.Ping(ctx); err != nil {
+	if err := s.store.Pool().Ping(ctx); err != nil {
 		s.log.WarnContext(r.Context(), "readiness check failed", "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "unavailable"})
 		return

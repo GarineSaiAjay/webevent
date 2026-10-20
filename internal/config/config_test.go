@@ -7,7 +7,14 @@ import (
 	"time"
 )
 
+const testKey = "test-key-0123456789abcdef0123456789"
+
+// lookupFrom returns a lookup over m. Required settings get valid defaults
+// unless the test sets them explicitly (use "" to simulate "unset").
 func lookupFrom(m map[string]string) func(string) (string, bool) {
+	if _, ok := m["WEBEVENT_API_KEYS"]; !ok {
+		m["WEBEVENT_API_KEYS"] = testKey
+	}
 	return func(k string) (string, bool) {
 		v, ok := m[k]
 		return v, ok
@@ -91,5 +98,34 @@ func TestWhitespaceTreatedAsUnset(t *testing.T) {
 	}
 	if cfg.HTTPAddr != ":8080" {
 		t.Fatalf("blank value should fall back to default, got %q", cfg.HTTPAddr)
+	}
+}
+
+func TestAPIKeys(t *testing.T) {
+	cfg, err := FromLookup(lookupFrom(map[string]string{
+		"WEBEVENT_DATABASE_URL": "postgres://db/x",
+		"WEBEVENT_API_KEYS":     " " + testKey + " , second-key-0123456789abcdef012345 ,",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.APIKeys) != 2 || cfg.APIKeys[0] != testKey {
+		t.Fatalf("APIKeys = %q", cfg.APIKeys)
+	}
+
+	_, err = FromLookup(lookupFrom(map[string]string{
+		"WEBEVENT_DATABASE_URL": "postgres://db/x",
+		"WEBEVENT_API_KEYS":     "short",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "shorter than 32") {
+		t.Fatalf("expected short key error, got %v", err)
+	}
+
+	_, err = FromLookup(lookupFrom(map[string]string{
+		"WEBEVENT_DATABASE_URL": "postgres://db/x",
+		"WEBEVENT_API_KEYS":     "",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "WEBEVENT_API_KEYS is required") {
+		t.Fatalf("expected missing key error, got %v", err)
 	}
 }
