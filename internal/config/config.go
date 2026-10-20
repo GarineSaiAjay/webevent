@@ -27,6 +27,11 @@ type Config struct {
 	// Delivery
 	WorkerPollInterval time.Duration
 	DeliveryTimeout    time.Duration
+
+	// Retries
+	MaxAttempts    int
+	RetryBaseDelay time.Duration
+	RetryMaxDelay  time.Duration
 }
 
 // Load reads configuration from the process environment.
@@ -50,6 +55,10 @@ func FromLookup(lookup func(string) (string, bool)) (Config, error) {
 
 		WorkerPollInterval: r.duration("WEBEVENT_WORKER_POLL_INTERVAL", time.Second),
 		DeliveryTimeout:    r.duration("WEBEVENT_DELIVERY_TIMEOUT", 15*time.Second),
+
+		MaxAttempts:    r.int("WEBEVENT_MAX_ATTEMPTS", 15),
+		RetryBaseDelay: r.duration("WEBEVENT_RETRY_BASE_DELAY", 10*time.Second),
+		RetryMaxDelay:  r.duration("WEBEVENT_RETRY_MAX_DELAY", 6*time.Hour),
 	}
 	if err := errors.Join(r.errs...); err != nil {
 		return Config{}, err
@@ -80,6 +89,15 @@ func (c Config) Validate() error {
 	}
 	if c.DeliveryTimeout < time.Second || c.DeliveryTimeout > 5*time.Minute {
 		errs = append(errs, errors.New("WEBEVENT_DELIVERY_TIMEOUT must be between 1s and 5m"))
+	}
+	if c.MaxAttempts < 1 || c.MaxAttempts > 100 {
+		errs = append(errs, errors.New("WEBEVENT_MAX_ATTEMPTS must be between 1 and 100"))
+	}
+	if c.RetryBaseDelay <= 0 {
+		errs = append(errs, errors.New("WEBEVENT_RETRY_BASE_DELAY must be positive"))
+	}
+	if c.RetryMaxDelay < c.RetryBaseDelay {
+		errs = append(errs, errors.New("WEBEVENT_RETRY_MAX_DELAY must be >= WEBEVENT_RETRY_BASE_DELAY"))
 	}
 	if len(c.APIKeys) == 0 {
 		errs = append(errs, errors.New("WEBEVENT_API_KEYS is required (comma-separated list of keys)"))

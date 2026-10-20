@@ -60,11 +60,11 @@ func (s *Sender) Send(ctx context.Context, j store.Job) store.AttemptResult {
 	start := time.Now()
 	body, err := BuildBody(j)
 	if err != nil {
-		return store.AttemptResult{Error: "build body: " + err.Error(), Duration: time.Since(start)}
+		return store.AttemptResult{Error: "build body: " + err.Error(), Duration: time.Since(start), Permanent: true}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, j.URL, bytes.NewReader(body))
 	if err != nil {
-		return store.AttemptResult{Error: "build request: " + err.Error(), Duration: time.Since(start)}
+		return store.AttemptResult{Error: "build request: " + err.Error(), Duration: time.Since(start), Permanent: true}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", s.userAgent)
@@ -84,6 +84,7 @@ func (s *Sender) Send(ctx context.Context, j store.Job) store.AttemptResult {
 	}
 	if !Successful(resp.StatusCode) {
 		res.Error = fmt.Sprintf("receiver responded %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+		res.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 	}
 	return res
 }
