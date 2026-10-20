@@ -2,7 +2,7 @@
 //
 // Usage:
 //
-//	webevent-server [serve]   run the API (default)
+//	webevent-server [serve]   run the API and delivery workers (default)
 //	webevent-server migrate   apply database migrations and exit
 //	webevent-server version   print the version and exit
 package main
@@ -22,6 +22,7 @@ import (
 	"github.com/GarineSaiAjay/webevent/internal/api"
 	"github.com/GarineSaiAjay/webevent/internal/config"
 	"github.com/GarineSaiAjay/webevent/internal/db"
+	"github.com/GarineSaiAjay/webevent/internal/delivery"
 	"github.com/GarineSaiAjay/webevent/internal/logging"
 	"github.com/GarineSaiAjay/webevent/internal/store"
 )
@@ -95,14 +96,21 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		}
 	}
 
+	st := store.New(pool)
+
+	// The delivery worker runs until ctx is cancelled (SIGINT/SIGTERM).
+	sender := delivery.NewSender(cfg.DeliveryTimeout, "webevent/"+version)
+	worker := delivery.NewWorker(st, sender, log.With("component", "worker"), cfg.WorkerPollInterval)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		worker.Run(ctx)
+	}()
+
+	handler := api.New(api.Options{Logger: log, Store: st, APIKeys: cfg.APIKeys, Version: version})
 	srv := &http.Server{
-		Addr: cfg.HTTPAddr,
-		Handler: api.New(api.Options{
-			Logger:  log,
-			Store:   store.New(pool),
-			APIKeys: cfg.APIKeys,
-			Version: version,
-		}),
+		Addr:              cfg.HTTPAddr,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -130,6 +138,11 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("http shutdown: %w", err)
+	}
+	select {
+	case <-workerDone:
+	case <-shutdownCtx.Done():
+		return errors.New("timed out waiting for the delivery worker to stop")
 	}
 	log.Info("shutdown complete")
 	return nil

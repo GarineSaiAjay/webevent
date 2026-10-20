@@ -35,6 +35,10 @@ func errNotFound(what string) *Error {
 	return &Error{Status: http.StatusNotFound, Code: "not_found", Message: what + " not found"}
 }
 
+func errConflict(msg string) *Error {
+	return &Error{Status: http.StatusConflict, Code: "conflict", Message: msg}
+}
+
 func errUnauthorized() *Error {
 	return &Error{Status: http.StatusUnauthorized, Code: "unauthorized", Message: "missing or invalid API key"}
 }

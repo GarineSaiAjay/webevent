@@ -43,6 +43,21 @@ func TestDefaults(t *testing.T) {
 	if cfg.ShutdownTimeout != 30*time.Second {
 		t.Errorf("ShutdownTimeout = %v, want 30s", cfg.ShutdownTimeout)
 	}
+	if cfg.WorkerPollInterval != time.Second || cfg.DeliveryTimeout != 15*time.Second {
+		t.Errorf("delivery defaults wrong: poll=%v timeout=%v", cfg.WorkerPollInterval, cfg.DeliveryTimeout)
+	}
+}
+
+func TestDeliveryTimeoutBounds(t *testing.T) {
+	for _, v := range []string{"500ms", "10m"} {
+		_, err := FromLookup(lookupFrom(map[string]string{
+			"WEBEVENT_DATABASE_URL":     "postgres://db/x",
+			"WEBEVENT_DELIVERY_TIMEOUT": v,
+		}))
+		if err == nil || !strings.Contains(err.Error(), "WEBEVENT_DELIVERY_TIMEOUT") {
+			t.Errorf("timeout %s: expected bounds error, got %v", v, err)
+		}
+	}
 }
 
 func TestOverrides(t *testing.T) {

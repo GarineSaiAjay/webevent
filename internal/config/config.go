@@ -23,6 +23,10 @@ type Config struct {
 	AutoMigrate     bool
 	ShutdownTimeout time.Duration
 	APIKeys         []string
+
+	// Delivery
+	WorkerPollInterval time.Duration
+	DeliveryTimeout    time.Duration
 }
 
 // Load reads configuration from the process environment.
@@ -43,6 +47,9 @@ func FromLookup(lookup func(string) (string, bool)) (Config, error) {
 		AutoMigrate:     r.bool("WEBEVENT_AUTO_MIGRATE", true),
 		ShutdownTimeout: r.duration("WEBEVENT_SHUTDOWN_TIMEOUT", 30*time.Second),
 		APIKeys:         r.list("WEBEVENT_API_KEYS"),
+
+		WorkerPollInterval: r.duration("WEBEVENT_WORKER_POLL_INTERVAL", time.Second),
+		DeliveryTimeout:    r.duration("WEBEVENT_DELIVERY_TIMEOUT", 15*time.Second),
 	}
 	if err := errors.Join(r.errs...); err != nil {
 		return Config{}, err
@@ -67,6 +74,12 @@ func (c Config) Validate() error {
 	}
 	if c.ShutdownTimeout <= 0 {
 		errs = append(errs, errors.New("WEBEVENT_SHUTDOWN_TIMEOUT must be positive"))
+	}
+	if c.WorkerPollInterval < 10*time.Millisecond {
+		errs = append(errs, errors.New("WEBEVENT_WORKER_POLL_INTERVAL must be at least 10ms"))
+	}
+	if c.DeliveryTimeout < time.Second || c.DeliveryTimeout > 5*time.Minute {
+		errs = append(errs, errors.New("WEBEVENT_DELIVERY_TIMEOUT must be between 1s and 5m"))
 	}
 	if len(c.APIKeys) == 0 {
 		errs = append(errs, errors.New("WEBEVENT_API_KEYS is required (comma-separated list of keys)"))
