@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -153,12 +154,41 @@ type AttemptResult struct {
 	Error        string // transport error or description of a non-2xx response
 	ResponseBody string // truncated
 	Duration     time.Duration
+	// RetryAfter is the receiver's Retry-After hint, if any.
+	RetryAfter time.Duration
+	// Permanent marks failures that retrying cannot fix (e.g. a URL that
+	// cannot be turned into a request).
+	Permanent bool
 }
 
-// RecordAttempt appends to the attempt log and moves the delivery to its
-// final state. WALKING SKELETON: there are no retries yet, so any failure is
-// final.
-func (s *Store) RecordAttempt(ctx context.Context, job Job, res AttemptResult, success bool) error {
+// Outcome is what an attempt means for the delivery.
+type Outcome int
+
+// Possible outcomes of an attempt.
+const (
+	OutcomeSucceeded Outcome = iota + 1 // done, receiver accepted it
+	OutcomeRetry                        // failed, try again later
+	OutcomeFailed                       // failed for good
+)
+
+// RecordAttempt appends to the attempt log and moves the delivery to the
+// state the outcome dictates, in one transaction.
+//
+// For OutcomeRetry the next attempt is scheduled at now()+retryIn using the
+// DATABASE clock. Every scheduling decision uses the same clock, so skew
+// between application servers can never make a retry fire early or late.
+func (s *Store) RecordAttempt(ctx context.Context, job Job, res AttemptResult, outcome Outcome, retryIn time.Duration) error {
+	var status string
+	switch outcome {
+	case OutcomeSucceeded:
+		status = DeliverySucceeded
+	case OutcomeRetry:
+		status = DeliveryPending
+	case OutcomeFailed:
+		status = DeliveryFailed
+	default:
+		return fmt.Errorf("record attempt: unknown outcome %d", outcome)
+	}
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO delivery_attempts (id, delivery_id, attempt_number, status_code, error, response_body, duration_ms)
@@ -168,10 +198,6 @@ func (s *Store) RecordAttempt(ctx context.Context, job Job, res AttemptResult, s
 			res.Duration.Milliseconds()); err != nil {
 			return err
 		}
-		status := DeliveryFailed
-		if success {
-			status = DeliverySucceeded
-		}
 		_, err := tx.Exec(ctx, `
 			UPDATE deliveries SET
 				status           = $2,
@@ -179,9 +205,13 @@ func (s *Store) RecordAttempt(ctx context.Context, job Job, res AttemptResult, s
 				last_attempt_at  = now(),
 				last_status_code = $4,
 				last_error       = $5,
-				completed_at     = now()
+				next_attempt_at  = CASE WHEN $2 = 'pending'
+				                        THEN now() + make_interval(secs => $6)
+				                        ELSE next_attempt_at END,
+				completed_at     = CASE WHEN $2 = 'pending' THEN NULL ELSE now() END
 			WHERE id = $1`,
-			job.DeliveryID, status, job.AttemptNumber, nullIfZero(res.StatusCode), nullIfEmpty(res.Error))
+			job.DeliveryID, status, job.AttemptNumber, nullIfZero(res.StatusCode), nullIfEmpty(res.Error),
+			retryIn.Seconds())
 		return err
 	})
 }

@@ -144,3 +144,22 @@ func TestAPIKeys(t *testing.T) {
 		t.Fatalf("expected missing key error, got %v", err)
 	}
 }
+
+func TestRetrySettings(t *testing.T) {
+	cfg, err := FromLookup(lookupFrom(map[string]string{"WEBEVENT_DATABASE_URL": "postgres://db/x"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxAttempts != 15 || cfg.RetryBaseDelay != 10*time.Second || cfg.RetryMaxDelay != 6*time.Hour {
+		t.Fatalf("retry defaults: %+v", cfg)
+	}
+	_, err = FromLookup(lookupFrom(map[string]string{
+		"WEBEVENT_DATABASE_URL":     "postgres://db/x",
+		"WEBEVENT_RETRY_BASE_DELAY": "1m",
+		"WEBEVENT_RETRY_MAX_DELAY":  "30s",
+		"WEBEVENT_MAX_ATTEMPTS":     "0",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "WEBEVENT_RETRY_MAX_DELAY") || !strings.Contains(err.Error(), "WEBEVENT_MAX_ATTEMPTS") {
+		t.Fatalf("expected retry validation errors, got %v", err)
+	}
+}

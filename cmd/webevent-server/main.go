@@ -100,7 +100,8 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 
 	// The delivery worker runs until ctx is cancelled (SIGINT/SIGTERM).
 	sender := delivery.NewSender(cfg.DeliveryTimeout, "webevent/"+version)
-	worker := delivery.NewWorker(st, sender, log.With("component", "worker"), cfg.WorkerPollInterval)
+	policy := delivery.RetryPolicy{MaxAttempts: cfg.MaxAttempts, BaseDelay: cfg.RetryBaseDelay, MaxDelay: cfg.RetryMaxDelay}
+	worker := delivery.NewWorker(st, sender, policy, log.With("component", "worker"), cfg.WorkerPollInterval)
 	workerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)

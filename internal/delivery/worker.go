@@ -9,18 +9,19 @@ import (
 	"github.com/GarineSaiAjay/webevent/internal/store"
 )
 
-// Worker is the walking-skeleton delivery loop: one goroutine, one delivery
-// at a time. Later stages replace it with a concurrent pool.
+// Worker is the single-goroutine delivery loop. Stage 6 replaces it with a
+// concurrent pool.
 type Worker struct {
 	store        *store.Store
 	sender       *Sender
+	policy       RetryPolicy
 	log          *slog.Logger
 	pollInterval time.Duration
 }
 
 // NewWorker builds a Worker.
-func NewWorker(st *store.Store, sender *Sender, log *slog.Logger, pollInterval time.Duration) *Worker {
-	return &Worker{store: st, sender: sender, log: log, pollInterval: pollInterval}
+func NewWorker(st *store.Store, sender *Sender, policy RetryPolicy, log *slog.Logger, pollInterval time.Duration) *Worker {
+	return &Worker{store: st, sender: sender, policy: policy, log: log, pollInterval: pollInterval}
 }
 
 // Run processes deliveries until ctx is cancelled.
@@ -58,22 +59,25 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	}
 
 	res := w.sender.Send(ctx, job)
-	ok := res.Error == "" && Successful(res.StatusCode)
+	dec := w.policy.Decide(job.AttemptNumber, res)
 
 	// Record with a context that survives shutdown: the HTTP request already
 	// happened, and forgetting its outcome would cause a duplicate delivery.
 	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	if err := w.store.RecordAttempt(recordCtx, job, res, ok); err != nil {
+	if err := w.store.RecordAttempt(recordCtx, job, res, dec.Outcome, dec.Delay); err != nil {
 		return true, err
 	}
 
 	log := w.log.With("delivery_id", job.DeliveryID, "event_id", job.EventID, "endpoint_id", job.EndpointID,
 		"attempt", job.AttemptNumber, "status_code", res.StatusCode, "duration_ms", res.Duration.Milliseconds())
-	if ok {
+	switch dec.Outcome {
+	case store.OutcomeSucceeded:
 		log.Info("delivery succeeded")
-	} else {
-		log.Warn("delivery failed", "err", res.Error)
+	case store.OutcomeRetry:
+		log.Warn("delivery attempt failed; will retry", "err", res.Error, "retry_in", dec.Delay.Round(time.Millisecond))
+	case store.OutcomeFailed:
+		log.Error("delivery failed permanently", "err", res.Error, "reason", dec.Reason)
 	}
 	return true, nil
 }
