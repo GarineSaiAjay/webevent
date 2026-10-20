@@ -137,12 +137,17 @@ func (s *Store) DeleteEndpoint(ctx context.Context, endpointID string) error {
 		if tag.RowsAffected() == 0 {
 			return ErrNotFound
 		}
+		// In-flight ('delivering') deliveries are cancelled too; their
+		// worker's lease token no longer matches, so its result is ignored.
 		_, err = tx.Exec(ctx, `
 			UPDATE deliveries SET
 				status       = 'cancelled',
+				locked_by    = NULL,
+				lease_token  = NULL,
+				locked_until = NULL,
 				last_error   = 'endpoint deleted',
 				completed_at = now()
-			WHERE endpoint_id = $1 AND status = 'pending'`, endpointID)
+			WHERE endpoint_id = $1 AND status IN ('pending', 'delivering')`, endpointID)
 		return err
 	})
 }

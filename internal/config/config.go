@@ -25,8 +25,12 @@ type Config struct {
 	APIKeys         []string
 
 	// Delivery
+	WorkerEnabled      bool
+	WorkerConcurrency  int
 	WorkerPollInterval time.Duration
 	DeliveryTimeout    time.Duration
+	LeaseDuration      time.Duration
+	ReapInterval       time.Duration
 
 	// Retries
 	MaxAttempts    int
@@ -56,8 +60,12 @@ func FromLookup(lookup func(string) (string, bool)) (Config, error) {
 		ShutdownTimeout: r.duration("WEBEVENT_SHUTDOWN_TIMEOUT", 30*time.Second),
 		APIKeys:         r.list("WEBEVENT_API_KEYS"),
 
+		WorkerEnabled:      r.bool("WEBEVENT_WORKER_ENABLED", true),
+		WorkerConcurrency:  r.int("WEBEVENT_WORKER_CONCURRENCY", 32),
 		WorkerPollInterval: r.duration("WEBEVENT_WORKER_POLL_INTERVAL", time.Second),
 		DeliveryTimeout:    r.duration("WEBEVENT_DELIVERY_TIMEOUT", 15*time.Second),
+		LeaseDuration:      r.duration("WEBEVENT_LEASE_DURATION", 60*time.Second),
+		ReapInterval:       r.duration("WEBEVENT_REAP_INTERVAL", 10*time.Second),
 
 		MaxAttempts:    r.int("WEBEVENT_MAX_ATTEMPTS", 15),
 		RetryBaseDelay: r.duration("WEBEVENT_RETRY_BASE_DELAY", 10*time.Second),
@@ -94,6 +102,21 @@ func (c Config) Validate() error {
 	}
 	if c.DeliveryTimeout < time.Second || c.DeliveryTimeout > 5*time.Minute {
 		errs = append(errs, errors.New("WEBEVENT_DELIVERY_TIMEOUT must be between 1s and 5m"))
+	}
+	if c.WorkerConcurrency < 1 || c.WorkerConcurrency > 1024 {
+		errs = append(errs, errors.New("WEBEVENT_WORKER_CONCURRENCY must be between 1 and 1024"))
+	}
+	// A lease must outlive the slowest possible attempt, or a healthy worker
+	// would lose its delivery to the reaper mid-request (causing duplicates).
+	if c.LeaseDuration < c.DeliveryTimeout+15*time.Second {
+		errs = append(errs, fmt.Errorf("WEBEVENT_LEASE_DURATION (%v) must be at least WEBEVENT_DELIVERY_TIMEOUT + 15s", c.LeaseDuration))
+	}
+	if c.ReapInterval <= 0 {
+		errs = append(errs, errors.New("WEBEVENT_REAP_INTERVAL must be positive"))
+	}
+	// Shutdown waits for in-flight deliveries, which take up to DeliveryTimeout.
+	if c.ShutdownTimeout < c.DeliveryTimeout+10*time.Second {
+		errs = append(errs, fmt.Errorf("WEBEVENT_SHUTDOWN_TIMEOUT (%v) must be at least WEBEVENT_DELIVERY_TIMEOUT + 10s", c.ShutdownTimeout))
 	}
 	if c.MaxAttempts < 1 || c.MaxAttempts > 100 {
 		errs = append(errs, errors.New("WEBEVENT_MAX_ATTEMPTS must be between 1 and 100"))

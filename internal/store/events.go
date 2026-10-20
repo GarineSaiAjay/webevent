@@ -128,7 +128,10 @@ func (s *Store) CreateEvent(ctx context.Context, in NewEvent) (CreateEventResult
 			return err
 		}
 		res.DeliveryCount = len(endpointIDs)
-		return nil
+		// Wake idle workers. NOTIFY inside a transaction is delivered only
+		// at COMMIT, so no worker can be woken for rows it cannot see yet.
+		_, err = tx.Exec(ctx, `SELECT pg_notify($1, '')`, NotifyChannel)
+		return err
 	})
 	return res, err
 }
