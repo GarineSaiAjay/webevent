@@ -24,6 +24,7 @@ type Endpoint struct {
 	Description         string    `json:"description"`
 	EventTypes          []string  `json:"event_types"`
 	Status              string    `json:"status"`
+	Kind                string    `json:"kind"`               // "http" or "listen"
 	RateLimitPerSec     *int      `json:"rate_limit_per_sec"` // null = unlimited
 	MaxInFlight         int       `json:"max_in_flight"`
 	ConsecutiveFailures int       `json:"consecutive_failures"`
@@ -57,12 +58,12 @@ type EndpointPatch struct {
 	MaxInFlight     *int
 }
 
-const endpointColumns = `id, url, description, event_types, status, rate_limit_per_sec, max_in_flight,
+const endpointColumns = `id, url, description, event_types, status, kind, rate_limit_per_sec, max_in_flight,
 	consecutive_failures, disabled_reason, created_at, updated_at`
 
 func scanEndpoint(row pgx.CollectableRow) (Endpoint, error) {
 	var e Endpoint
-	err := row.Scan(&e.ID, &e.URL, &e.Description, &e.EventTypes, &e.Status, &e.RateLimitPerSec, &e.MaxInFlight,
+	err := row.Scan(&e.ID, &e.URL, &e.Description, &e.EventTypes, &e.Status, &e.Kind, &e.RateLimitPerSec, &e.MaxInFlight,
 		&e.ConsecutiveFailures, &e.DisabledReason, &e.CreatedAt, &e.UpdatedAt)
 	return e, err
 }

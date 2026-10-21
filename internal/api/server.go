@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GarineSaiAjay/webevent/internal/delivery"
 	"github.com/GarineSaiAjay/webevent/internal/observability"
 	"github.com/GarineSaiAjay/webevent/internal/store"
 )
@@ -26,6 +27,9 @@ type Options struct {
 	// Draining, when set to true, makes /readyz fail so load balancers
 	// stop sending traffic before the server shuts down. May be nil.
 	Draining *atomic.Bool
+	// RetryPolicy applies to results reported by `webevent listen`.
+	// Zero value means delivery.DefaultRetryPolicy().
+	RetryPolicy delivery.RetryPolicy
 }
 
 // Server holds handler dependencies.
@@ -37,6 +41,7 @@ type Server struct {
 	allowPrivate bool
 	metrics      *observability.Metrics
 	draining     *atomic.Bool
+	policy       delivery.RetryPolicy
 }
 
 // New builds the API and returns its root handler.
@@ -50,6 +55,10 @@ func New(opts Options) http.Handler {
 		allowPrivate: opts.AllowPrivateNetworks,
 		metrics:      opts.Metrics,
 		draining:     opts.Draining,
+		policy:       opts.RetryPolicy,
+	}
+	if s.policy.MaxAttempts == 0 {
+		s.policy = delivery.DefaultRetryPolicy()
 	}
 	if s.draining == nil {
 		s.draining = &atomic.Bool{}
@@ -77,6 +86,10 @@ func New(opts Options) http.Handler {
 	v1.HandleFunc("GET /v1/deliveries/{id}", s.handleGetDelivery)
 	v1.HandleFunc("POST /v1/deliveries/{id}/replay", s.handleReplayDelivery)
 	v1.HandleFunc("GET /v1/attempts", s.handleListAttempts)
+	v1.HandleFunc("POST /v1/listen", s.handleCreateListenSession)
+	v1.HandleFunc("GET /v1/listen/{id}/deliveries", s.handleListenPoll)
+	v1.HandleFunc("POST /v1/listen/{id}/results", s.handleListenResults)
+	v1.HandleFunc("DELETE /v1/listen/{id}", s.handleDeleteListenSession)
 	v1.HandleFunc("/v1/", s.handleNoRoute)
 	mux.Handle("/v1/", s.requireAPIKey(v1))
 

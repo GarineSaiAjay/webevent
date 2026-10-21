@@ -55,7 +55,7 @@ func (s *Store) ClaimJobs(ctx context.Context, workerID string, limit int, lease
 		rows, err := tx.Query(ctx, `
 			SELECT ep.id
 			FROM endpoints ep
-			WHERE ep.status = 'active' AND ep.deleted_at IS NULL
+			WHERE ep.status = 'active' AND ep.deleted_at IS NULL AND ep.kind = 'http'
 			  AND EXISTS (SELECT 1 FROM deliveries d
 			              WHERE d.endpoint_id = ep.id AND d.status = 'pending' AND d.next_attempt_at <= now())
 			ORDER BY ep.last_claimed_at NULLS FIRST
