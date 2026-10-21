@@ -73,7 +73,7 @@ func (s *Server) handleListEndpoints(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, s.log, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, listResponse[store.Endpoint]{Data: list, NextCursor: next})
+	writeJSON(w, http.StatusOK, newList(list, next))
 }
 
 func (s *Server) handleGetEndpoint(w http.ResponseWriter, r *http.Request) {

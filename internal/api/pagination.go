@@ -13,6 +13,15 @@ type listResponse[T any] struct {
 	NextCursor string `json:"next_cursor,omitempty"`
 }
 
+// newList builds a listResponse, turning a nil slice into [] so clients
+// always receive a JSON array.
+func newList[T any](data []T, next string) listResponse[T] {
+	if data == nil {
+		data = []T{}
+	}
+	return listResponse[T]{Data: data, NextCursor: next}
+}
+
 // parsePage reads ?limit= and ?cursor= from the query string.
 func parsePage(r *http.Request) (store.Page, error) {
 	q := r.URL.Query()

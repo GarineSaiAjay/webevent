@@ -129,5 +129,5 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, s.log, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, listResponse[store.Event]{Data: list, NextCursor: next})
+	writeJSON(w, http.StatusOK, newList(list, next))
 }

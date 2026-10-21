@@ -33,7 +33,7 @@ func (s *Server) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, s.log, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, listResponse[store.Delivery]{Data: list, NextCursor: next})
+	writeJSON(w, http.StatusOK, newList(list, next))
 }
 
 type deliveryResponse struct {

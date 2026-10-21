@@ -14,6 +14,12 @@ linters:
     - sqlclosecheck
     - unconvert
   settings:
+    errcheck:
+      # Writing CLI output to stdout: there is nothing useful to do on failure.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
     revive:
       rules:
         - name: exported
