@@ -67,6 +67,7 @@ func New(opts Options) http.Handler {
 	v1.HandleFunc("GET /v1/deliveries", s.handleListDeliveries)
 	v1.HandleFunc("GET /v1/deliveries/{id}", s.handleGetDelivery)
 	v1.HandleFunc("POST /v1/deliveries/{id}/replay", s.handleReplayDelivery)
+	v1.HandleFunc("GET /v1/attempts", s.handleListAttempts)
 	v1.HandleFunc("/v1/", s.handleNoRoute)
 	mux.Handle("/v1/", s.requireAPIKey(v1))
 
