@@ -16,14 +16,18 @@ type Options struct {
 	Store   *store.Store
 	APIKeys []string
 	Version string
+	// AllowPrivateNetworks accepts endpoint URLs pointing at private or
+	// loopback IP literals (development only).
+	AllowPrivateNetworks bool
 }
 
 // Server holds handler dependencies.
 type Server struct {
-	log     *slog.Logger
-	store   *store.Store
-	auth    *apiKeyAuth
-	version string
+	log          *slog.Logger
+	store        *store.Store
+	auth         *apiKeyAuth
+	version      string
+	allowPrivate bool
 }
 
 // New builds the API and returns its root handler.
@@ -33,6 +37,8 @@ func New(opts Options) http.Handler {
 		store:   opts.Store,
 		auth:    newAPIKeyAuth(opts.APIKeys),
 		version: opts.Version,
+
+		allowPrivate: opts.AllowPrivateNetworks,
 	}
 
 	// Unauthenticated operational routes.
@@ -48,6 +54,8 @@ func New(opts Options) http.Handler {
 	v1.HandleFunc("PATCH /v1/endpoints/{id}", s.handleUpdateEndpoint)
 	v1.HandleFunc("DELETE /v1/endpoints/{id}", s.handleDeleteEndpoint)
 	v1.HandleFunc("POST /v1/endpoints/{id}/replay", s.handleReplayEndpoint)
+	v1.HandleFunc("GET /v1/endpoints/{id}/secret", s.handleGetEndpointSecret)
+	v1.HandleFunc("POST /v1/endpoints/{id}/rotate-secret", s.handleRotateEndpointSecret)
 	v1.HandleFunc("POST /v1/events", s.handleCreateEvent)
 	v1.HandleFunc("GET /v1/events", s.handleListEvents)
 	v1.HandleFunc("GET /v1/events/{id}", s.handleGetEvent)

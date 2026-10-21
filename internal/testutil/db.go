@@ -19,7 +19,7 @@ import (
 )
 
 // EnvTestDatabaseURL points at a Postgres server the tests may create and
-// drop databases on, e.g. postgres://webevent:webevent@localhost:5433/postgres
+// drop databases on, e.g. postgres://webevent:webevent@localhost:5432/postgres
 const EnvTestDatabaseURL = "WEBEVENT_TEST_DATABASE_URL"
 
 // NewDB creates a brand-new, fully migrated database for a single test and
@@ -34,6 +34,19 @@ func NewDB(t testing.TB) *pgxpool.Pool {
 // NewDBWithURL is NewDB but also returns the connection string of the new
 // database (needed by code that opens its own connections, e.g. LISTEN).
 func NewDBWithURL(t testing.TB) (*pgxpool.Pool, string) {
+	t.Helper()
+	return newDB(t, true)
+}
+
+// NewEmptyDB creates a fresh database WITHOUT running migrations, for tests
+// that exercise migrations themselves.
+func NewEmptyDB(t testing.TB) *pgxpool.Pool {
+	t.Helper()
+	pool, _ := newDB(t, false)
+	return pool
+}
+
+func newDB(t testing.TB, migrate bool) (*pgxpool.Pool, string) {
 	t.Helper()
 	adminURL := os.Getenv(EnvTestDatabaseURL)
 	if adminURL == "" {
@@ -64,12 +77,14 @@ func NewDBWithURL(t testing.TB) (*pgxpool.Pool, string) {
 	if err != nil {
 		t.Fatalf("connect test database: %v", err)
 	}
-	migs, err := db.Migrations()
-	if err != nil {
-		t.Fatalf("load migrations: %v", err)
-	}
-	if err := db.Migrate(ctx, pool, migs, logging.Discard()); err != nil {
-		t.Fatalf("migrate test database: %v", err)
+	if migrate {
+		migs, err := db.Migrations()
+		if err != nil {
+			t.Fatalf("load migrations: %v", err)
+		}
+		if err := db.Migrate(ctx, pool, migs, logging.Discard()); err != nil {
+			t.Fatalf("migrate test database: %v", err)
+		}
 	}
 
 	t.Cleanup(func() {

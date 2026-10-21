@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/GarineSaiAjay/webevent/internal/netguard"
 	"github.com/GarineSaiAjay/webevent/internal/store"
 )
 
@@ -22,9 +23,10 @@ var eventTypeRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,127}$`)
 func validEventType(s string) bool { return eventTypeRE.MatchString(s) }
 
 // validateEndpointURL accepts absolute http(s) URLs without credentials or
-// fragments. Network-level safety (no private IPs) is enforced at delivery
-// time, because DNS can change after an endpoint is created.
-func validateEndpointURL(raw string) string {
+// fragments. Unless allowPrivate is set, IP-literal hosts in private ranges
+// are rejected here for a friendly error; the authoritative SSRF check runs
+// at connect time, because DNS answers can change after creation.
+func validateEndpointURL(raw string, allowPrivate bool) string {
 	if raw == "" {
 		return "is required"
 	}
@@ -46,6 +48,11 @@ func validateEndpointURL(raw string) string {
 	}
 	if u.Fragment != "" {
 		return "must not contain a fragment"
+	}
+	if !allowPrivate {
+		if strings.EqualFold(u.Hostname(), "localhost") || netguard.CheckLiteral(u.Hostname()) != nil {
+			return "must not point at a private, loopback or link-local address"
+		}
 	}
 	return ""
 }

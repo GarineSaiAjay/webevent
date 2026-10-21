@@ -3,6 +3,8 @@ package delivery
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,13 +13,21 @@ import (
 	"unicode/utf8"
 
 	"github.com/GarineSaiAjay/webevent/internal/store"
+	"github.com/GarineSaiAjay/webevent/pkg/webhook"
 )
 
 func job(url string) store.Job {
 	return store.Job{
 		DeliveryID: "dlv_x", AttemptNumber: 1, EventID: "evt_x", EventType: "a.b",
 		Payload: json.RawMessage(`{"k":"v"}`), EventCreatedAt: time.Unix(0, 0), EndpointID: "ep_x", URL: url,
+		Secrets: []string{testSecret},
 	}
+}
+
+var testSecret = webhook.NewSecret()
+
+func testSender(timeout time.Duration) *Sender {
+	return NewSender(SenderOptions{Timeout: timeout, UserAgent: "t", AllowPrivateNetworks: true})
 }
 
 func TestSendDoesNotFollowRedirects(t *testing.T) {
@@ -26,7 +36,7 @@ func TestSendDoesNotFollowRedirects(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res := NewSender(time.Second, "t").Send(context.Background(), job(srv.URL))
+	res := testSender(time.Second).Send(context.Background(), job(srv.URL))
 	if res.StatusCode != http.StatusFound || res.Error == "" {
 		t.Fatalf("redirect must be reported as a failure, got %+v", res)
 	}
@@ -41,7 +51,7 @@ func TestSendTimesOut(t *testing.T) {
 	defer close(release)
 
 	start := time.Now()
-	res := NewSender(200*time.Millisecond, "t").Send(context.Background(), job(srv.URL))
+	res := testSender(200*time.Millisecond).Send(context.Background(), job(srv.URL))
 	if res.Error == "" || res.StatusCode != 0 {
 		t.Fatalf("expected timeout error, got %+v", res)
 	}
@@ -56,7 +66,7 @@ func TestSendCapsResponseBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res := NewSender(time.Second, "t").Send(context.Background(), job(srv.URL))
+	res := testSender(time.Second).Send(context.Background(), job(srv.URL))
 	if len(res.ResponseBody) > maxStoredResponse+3 {
 		t.Fatalf("stored body is %d bytes", len(res.ResponseBody))
 	}
@@ -88,5 +98,50 @@ func TestSuccessful(t *testing.T) {
 		if Successful(code) != want {
 			t.Errorf("Successful(%d) = %v", code, !want)
 		}
+	}
+}
+
+func TestSendSignsRequest(t *testing.T) {
+	verifier, err := webhook.NewVerifier(testSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var verr error
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		verr = verifier.Verify(r.Header, body)
+	}))
+	defer srv.Close()
+
+	res := testSender(time.Second).Send(context.Background(), job(srv.URL))
+	if res.Error != "" {
+		t.Fatal(res.Error)
+	}
+	if verr != nil {
+		t.Fatalf("receiver could not verify the signature: %v", verr)
+	}
+}
+
+func TestSSRFProtectionBlocksLoopback(t *testing.T) {
+	hit := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hit = true }))
+	defer srv.Close()
+
+	guarded := NewSender(SenderOptions{Timeout: time.Second, UserAgent: "t"})
+	res := guarded.Send(context.Background(), job(srv.URL))
+	if hit {
+		t.Fatal("request reached a loopback server despite SSRF protection")
+	}
+	if !res.Permanent || !strings.Contains(res.Error, "not allowed") {
+		t.Fatalf("want permanent blocked error, got %+v", res)
+	}
+}
+
+func TestUndecryptableSecretIsPermanent(t *testing.T) {
+	j := job("http://127.0.0.1:1")
+	j.SecretErr = errors.New("bad key")
+	res := testSender(time.Second).Send(context.Background(), j)
+	if !res.Permanent || !strings.Contains(res.Error, "signing secret") {
+		t.Fatalf("res = %+v", res)
 	}
 }

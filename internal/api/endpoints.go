@@ -23,7 +23,7 @@ func (s *Server) handleCreateEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fields := map[string]string{}
-	if msg := validateEndpointURL(req.URL); msg != "" {
+	if msg := validateEndpointURL(req.URL, s.allowPrivate); msg != "" {
 		fields["url"] = msg
 	}
 	if len(req.Description) > maxDescriptionLength {
@@ -101,7 +101,7 @@ func (s *Server) handleUpdateEndpoint(w http.ResponseWriter, r *http.Request) {
 	fields := map[string]string{}
 	patch := store.EndpointPatch{URL: req.URL, Description: req.Description, Status: req.Status}
 	if req.URL != nil {
-		if msg := validateEndpointURL(*req.URL); msg != "" {
+		if msg := validateEndpointURL(*req.URL, s.allowPrivate); msg != "" {
 			fields["url"] = msg
 		}
 	}
@@ -196,4 +196,72 @@ func (s *Server) handleReplayEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"replayed": n, "since": since.UTC(), "until": until.UTC()})
+}
+
+// Grace period applied to the old signing secret on rotation.
+const (
+	defaultSecretGrace = 24 * time.Hour
+	maxSecretGrace     = 7 * 24 * time.Hour
+)
+
+func (s *Server) handleGetEndpointSecret(w http.ResponseWriter, r *http.Request) {
+	epID := r.PathValue("id")
+	if !id.Valid(id.PrefixEndpoint, epID) {
+		writeError(w, r, s.log, errNotFound("endpoint"))
+		return
+	}
+	secret, err := s.store.GetEndpointSecret(r.Context(), epID)
+	if errors.Is(err, store.ErrNotFound) {
+		err = errNotFound("endpoint")
+	}
+	if err != nil {
+		writeError(w, r, s.log, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"secret": secret})
+}
+
+type rotateSecretRequest struct {
+	// GracePeriod is a Go duration ("1h", "30m"); "0s" revokes the old secret now.
+	GracePeriod *string `json:"grace_period"`
+}
+
+func (s *Server) handleRotateEndpointSecret(w http.ResponseWriter, r *http.Request) {
+	epID := r.PathValue("id")
+	if !id.Valid(id.PrefixEndpoint, epID) {
+		writeError(w, r, s.log, errNotFound("endpoint"))
+		return
+	}
+	var req rotateSecretRequest
+	if r.ContentLength != 0 {
+		if err := decodeJSON(w, r, &req); err != nil {
+			writeError(w, r, s.log, err)
+			return
+		}
+	}
+	grace := defaultSecretGrace
+	if req.GracePeriod != nil {
+		d, err := time.ParseDuration(*req.GracePeriod)
+		if err != nil || d < 0 || d > maxSecretGrace {
+			writeError(w, r, s.log, errValidation(map[string]string{
+				"grace_period": "must be a duration between 0s and " + maxSecretGrace.String() + ", e.g. \"1h\"",
+			}))
+			return
+		}
+		grace = d
+	}
+
+	secret, err := s.store.RotateEndpointSecret(r.Context(), epID, grace)
+	if errors.Is(err, store.ErrNotFound) {
+		err = errNotFound("endpoint")
+	}
+	if err != nil {
+		writeError(w, r, s.log, err)
+		return
+	}
+	resp := map[string]any{"secret": secret, "previous_secret_valid_until": nil}
+	if grace > 0 {
+		resp["previous_secret_valid_until"] = time.Now().Add(grace).UTC()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

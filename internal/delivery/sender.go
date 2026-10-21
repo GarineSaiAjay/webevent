@@ -6,12 +6,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 
+	"github.com/GarineSaiAjay/webevent/internal/netguard"
 	"github.com/GarineSaiAjay/webevent/internal/store"
+	"github.com/GarineSaiAjay/webevent/pkg/webhook"
 )
 
 // maxStoredResponse is how much of a receiver's response body we keep for
@@ -35,18 +39,53 @@ func BuildBody(j store.Job) ([]byte, error) {
 	return json.Marshal(Envelope{ID: j.EventID, Type: j.EventType, CreatedAt: j.EventCreatedAt.UTC(), Data: j.Payload})
 }
 
+// SenderOptions configures a Sender.
+type SenderOptions struct {
+	Timeout   time.Duration
+	UserAgent string
+	// AllowPrivateNetworks disables SSRF protection. Only for local
+	// development and tests, where receivers run on localhost.
+	AllowPrivateNetworks bool
+	// Now is the signing clock; nil means time.Now.
+	Now func() time.Time
+}
+
 // Sender performs the HTTP request for a job.
 type Sender struct {
 	client    *http.Client
 	userAgent string
+	now       func() time.Time
 }
 
-// NewSender returns a Sender whose requests time out after timeout.
-func NewSender(timeout time.Duration, userAgent string) *Sender {
+// NewSender builds a Sender with a hardened HTTP client.
+func NewSender(o SenderOptions) *Sender {
+	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
+	if !o.AllowPrivateNetworks {
+		dialer.Control = netguard.Control
+	}
+	transport := &http.Transport{
+		// Never use HTTP(S)_PROXY from the environment: the guard checks
+		// the IP we dial, and with a proxy that would be the proxy's IP.
+		Proxy:                 nil,
+		DialContext:           dialer.DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          512,
+		MaxIdleConnsPerHost:   16,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: o.Timeout,
+		ExpectContinueTimeout: time.Second,
+	}
+	now := o.Now
+	if now == nil {
+		now = time.Now
+	}
 	return &Sender{
-		userAgent: userAgent,
+		userAgent: o.UserAgent,
+		now:       now,
 		client: &http.Client{
-			Timeout: timeout,
+			Transport: transport,
+			Timeout:   o.Timeout,
 			// A webhook URL that redirects is a misconfiguration; following
 			// redirects would also let a receiver bounce us to internal hosts.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -54,25 +93,36 @@ func NewSender(timeout time.Duration, userAgent string) *Sender {
 	}
 }
 
-// Send POSTs the job and reports what happened. A non-nil error is never
-// returned: every outcome (including transport failures) is a result.
+// Send signs and POSTs the job and reports what happened. Every outcome,
+// including transport failures, is returned as a result.
 func (s *Sender) Send(ctx context.Context, j store.Job) store.AttemptResult {
 	start := time.Now()
+	fail := func(msg string, permanent bool) store.AttemptResult {
+		return store.AttemptResult{Error: msg, Duration: time.Since(start), Permanent: permanent}
+	}
+	if j.SecretErr != nil {
+		return fail("signing secret unavailable: "+j.SecretErr.Error(), true)
+	}
 	body, err := BuildBody(j)
 	if err != nil {
-		return store.AttemptResult{Error: "build body: " + err.Error(), Duration: time.Since(start), Permanent: true}
+		return fail("build body: "+err.Error(), true)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, j.URL, bytes.NewReader(body))
 	if err != nil {
-		return store.AttemptResult{Error: "build request: " + err.Error(), Duration: time.Since(start), Permanent: true}
+		return fail("build request: "+err.Error(), true)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", s.userAgent)
-	req.Header.Set("Webhook-Id", j.EventID)
+	// webhook-id is the event id: identical across retries and replays, so
+	// receivers can use it to drop duplicates (delivery is at-least-once).
+	if err := webhook.SetHeaders(req.Header, j.EventID, s.now(), body, j.Secrets...); err != nil {
+		return fail("sign: "+err.Error(), true)
+	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return store.AttemptResult{Error: err.Error(), Duration: time.Since(start)}
+		// A blocked destination will stay blocked; don't burn retries on it.
+		return fail(err.Error(), errors.Is(err, netguard.ErrBlocked))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -100,5 +150,5 @@ func sanitizeBody(b []byte, n int) string {
 		b = b[:n]
 	}
 	b = bytes.ReplaceAll(b, []byte{0}, nil)
-	return string(bytes.ToValidUTF8(b, []byte("\uFFFD")))
+	return string(bytes.ToValidUTF8(b, []byte("�")))
 }

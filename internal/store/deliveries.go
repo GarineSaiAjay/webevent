@@ -140,6 +140,12 @@ type Job struct {
 	// LeaseToken proves this worker still owns the delivery when it records
 	// the result (see RecordAttempt).
 	LeaseToken string
+	// Secrets are the endpoint's signing secrets, current first. During a
+	// rotation grace period there are two.
+	Secrets []string
+	// SecretErr is set when a secret could not be decrypted; the attempt
+	// must fail permanently rather than be sent unsigned.
+	SecretErr error
 }
 
 // AttemptResult is what happened when a worker sent a job.

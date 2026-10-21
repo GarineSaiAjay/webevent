@@ -56,17 +56,41 @@ func (s *Store) ClaimJobs(ctx context.Context, workerID string, limit int, lease
 		FROM due, events e, endpoints ep
 		WHERE d.id = due.id AND e.id = d.event_id AND ep.id = d.endpoint_id
 		RETURNING d.id, d.attempt_count, d.attempt_count - d.attempt_offset,
-		          e.id, e.event_type, e.payload, e.created_at, ep.id, ep.url, d.lease_token`,
+		          e.id, e.event_type, e.payload, e.created_at, ep.id, ep.url, d.lease_token,
+		          ep.secret,
+		          CASE WHEN ep.previous_secret_expires_at > now() THEN ep.previous_secret END`,
 		limit, workerID, token, leaseFor.Seconds())
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (Job, error) {
 		var j Job
+		var current string
+		var previous *string
 		err := row.Scan(&j.DeliveryID, &j.AttemptNumber, &j.RetryAttempt, &j.EventID, &j.EventType, &j.Payload,
-			&j.EventCreatedAt, &j.EndpointID, &j.URL, &j.LeaseToken)
-		return j, err
+			&j.EventCreatedAt, &j.EndpointID, &j.URL, &j.LeaseToken, &current, &previous)
+		if err != nil {
+			return j, err
+		}
+		j.Secrets, j.SecretErr = s.openSecrets(current, previous)
+		return j, nil
 	})
+}
+
+func (s *Store) openSecrets(current string, previous *string) ([]string, error) {
+	cur, err := s.box.Open(current)
+	if err != nil {
+		return nil, err
+	}
+	out := []string{cur}
+	if previous != nil {
+		prev, err := s.box.Open(*previous)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, prev)
+	}
+	return out, nil
 }
 
 // ReapExpiredLeases returns deliveries whose lease ran out (their worker

@@ -39,6 +39,10 @@ type Config struct {
 
 	// Dead letters
 	EndpointDisableAfter int
+
+	// Security
+	AllowPrivateNetworks bool
+	SecretKey            string // base64 32-byte key for encrypting signing secrets at rest
 }
 
 // Load reads configuration from the process environment.
@@ -72,6 +76,9 @@ func FromLookup(lookup func(string) (string, bool)) (Config, error) {
 		RetryMaxDelay:  r.duration("WEBEVENT_RETRY_MAX_DELAY", 6*time.Hour),
 
 		EndpointDisableAfter: r.int("WEBEVENT_ENDPOINT_DISABLE_AFTER", 10),
+
+		AllowPrivateNetworks: r.bool("WEBEVENT_ALLOW_PRIVATE_NETWORKS", false),
+		SecretKey:            r.str("WEBEVENT_SECRET_KEY", ""),
 	}
 	if err := errors.Join(r.errs...); err != nil {
 		return Config{}, err

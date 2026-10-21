@@ -7,6 +7,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/GarineSaiAjay/webevent/internal/id"
+	"github.com/GarineSaiAjay/webevent/pkg/webhook"
 )
 
 // Endpoint statuses.
@@ -27,6 +28,9 @@ type Endpoint struct {
 	DisabledReason      *string   `json:"disabled_reason,omitempty"`
 	CreatedAt           time.Time `json:"created_at"`
 	UpdatedAt           time.Time `json:"updated_at"`
+	// Secret is only filled in by calls that deliberately reveal it
+	// (create, get-secret, rotate); it is never part of ordinary reads.
+	Secret string `json:"secret,omitempty"`
 }
 
 // NewEndpoint is the input to CreateEndpoint. It must already be validated.
@@ -53,17 +57,59 @@ func scanEndpoint(row pgx.CollectableRow) (Endpoint, error) {
 	return e, err
 }
 
-// CreateEndpoint inserts a new endpoint.
+// CreateEndpoint inserts a new endpoint with a freshly generated signing
+// secret. The returned Endpoint includes the secret.
 func (s *Store) CreateEndpoint(ctx context.Context, in NewEndpoint) (Endpoint, error) {
-	rows, err := s.pool.Query(ctx, `
-		INSERT INTO endpoints (id, url, description, event_types)
-		VALUES ($1, $2, $3, $4)
-		RETURNING `+endpointColumns,
-		id.New(id.PrefixEndpoint), in.URL, in.Description, in.EventTypes)
+	secret := webhook.NewSecret()
+	sealed, err := s.box.Seal(secret)
 	if err != nil {
 		return Endpoint{}, err
 	}
-	return pgx.CollectExactlyOneRow(rows, scanEndpoint)
+	rows, err := s.pool.Query(ctx, `
+		INSERT INTO endpoints (id, url, description, event_types, secret)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING `+endpointColumns,
+		id.New(id.PrefixEndpoint), in.URL, in.Description, in.EventTypes, sealed)
+	if err != nil {
+		return Endpoint{}, err
+	}
+	ep, err := pgx.CollectExactlyOneRow(rows, scanEndpoint)
+	ep.Secret = secret
+	return ep, err
+}
+
+// GetEndpointSecret returns the current signing secret of an endpoint.
+func (s *Store) GetEndpointSecret(ctx context.Context, endpointID string) (string, error) {
+	var sealed string
+	err := s.pool.QueryRow(ctx, `SELECT secret FROM endpoints WHERE id = $1 AND deleted_at IS NULL`, endpointID).Scan(&sealed)
+	if err != nil {
+		return "", notFoundIfNoRows(err)
+	}
+	return s.box.Open(sealed)
+}
+
+// RotateEndpointSecret replaces the signing secret. The old secret stays
+// valid (requests are signed with both) for grace, so receivers can deploy
+// the new secret without dropping webhooks. grace = 0 revokes it at once.
+func (s *Store) RotateEndpointSecret(ctx context.Context, endpointID string, grace time.Duration) (string, error) {
+	secret := webhook.NewSecret()
+	sealed, err := s.box.Seal(secret)
+	if err != nil {
+		return "", err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE endpoints SET
+			previous_secret            = CASE WHEN $3 > 0 THEN secret END,
+			previous_secret_expires_at = CASE WHEN $3 > 0 THEN now() + make_interval(secs => $3) END,
+			secret                     = $2
+		WHERE id = $1 AND deleted_at IS NULL`, endpointID, sealed, grace.Seconds())
+	if err != nil {
+		return "", err
+	}
+	if tag.RowsAffected() == 0 {
+		return "", ErrNotFound
+	}
+	return secret, nil
 }
 
 // GetEndpoint returns a live (not deleted) endpoint.

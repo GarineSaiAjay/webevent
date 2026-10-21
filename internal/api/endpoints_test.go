@@ -232,3 +232,47 @@ func TestListExcludesDeleted(t *testing.T) {
 		t.Fatalf("list = %+v", page.Data)
 	}
 }
+
+func TestEndpointSecretLifecycle(t *testing.T) {
+	a := newTestAPI(t)
+	rec := a.do(http.MethodPost, "/v1/endpoints", map[string]any{"url": "https://example.com/h", "event_types": []string{"*"}})
+	expectStatus(t, rec, http.StatusCreated)
+	created := decode[store.Endpoint](t, rec)
+	if !strings.HasPrefix(created.Secret, "whsec_") {
+		t.Fatalf("create must return the secret, got %+v", created)
+	}
+
+	rec = a.do(http.MethodGet, "/v1/endpoints/"+created.ID, nil)
+	if strings.Contains(rec.Body.String(), "whsec_") {
+		t.Fatal("GET endpoint must not include the secret")
+	}
+	rec = a.do(http.MethodGet, "/v1/endpoints", nil)
+	if strings.Contains(rec.Body.String(), "whsec_") {
+		t.Fatal("list must not include secrets")
+	}
+
+	rec = a.do(http.MethodGet, "/v1/endpoints/"+created.ID+"/secret", nil)
+	expectStatus(t, rec, http.StatusOK)
+	if got := decode[map[string]string](t, rec)["secret"]; got != created.Secret {
+		t.Fatalf("secret = %q", got)
+	}
+
+	rec = a.do(http.MethodPost, "/v1/endpoints/"+created.ID+"/rotate-secret", map[string]any{"grace_period": "1h"})
+	expectStatus(t, rec, http.StatusOK)
+	rotated := decode[map[string]any](t, rec)
+	if rotated["secret"] == created.Secret || rotated["previous_secret_valid_until"] == nil {
+		t.Fatalf("rotate = %v", rotated)
+	}
+	expectStatus(t, a.do(http.MethodPost, "/v1/endpoints/"+created.ID+"/rotate-secret", nil), http.StatusOK)
+	expectStatus(t, a.do(http.MethodPost, "/v1/endpoints/"+created.ID+"/rotate-secret", map[string]any{"grace_period": "1000h"}), http.StatusUnprocessableEntity)
+	expectStatus(t, a.do(http.MethodPost, "/v1/endpoints/"+created.ID+"/rotate-secret", map[string]any{"grace_period": "soon"}), http.StatusUnprocessableEntity)
+	expectStatus(t, a.do(http.MethodGet, "/v1/endpoints/ep_00000000000000000000000000/secret", nil), http.StatusNotFound)
+}
+
+func TestPrivateURLsRejected(t *testing.T) {
+	a := newTestAPI(t)
+	for _, u := range []string{"http://127.0.0.1/h", "http://localhost:8080/h", "http://10.0.0.5/h", "http://169.254.169.254/latest", "http://[::1]/h"} {
+		rec := a.do(http.MethodPost, "/v1/endpoints", map[string]any{"url": u, "event_types": []string{"*"}})
+		expectStatus(t, rec, http.StatusUnprocessableEntity)
+	}
+}
