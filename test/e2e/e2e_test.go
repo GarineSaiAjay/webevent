@@ -133,7 +133,7 @@ func TestCrashRecovery(t *testing.T) {
 	if err := a.cmd.Process.Kill(); err != nil { // SIGKILL
 		t.Fatal(err)
 	}
-	<-a.done
+	<-a.done //nolint:errcheck // exit status is irrelevant here
 	a.done <- nil
 	block.Store(false)
 	close(release)

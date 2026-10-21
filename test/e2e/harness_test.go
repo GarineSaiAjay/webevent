@@ -116,7 +116,7 @@ func startServer(t *testing.T, dbURL string, extra ...string) *server {
 	go func() { s.done <- cmd.Wait() }()
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
-		<-s.done
+		<-s.done //nolint:errcheck // exit status is irrelevant here
 		if t.Failed() {
 			t.Logf("server %s logs:\n%s", addr, logs.String())
 		}
