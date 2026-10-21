@@ -29,6 +29,14 @@ db-reset: ## Destroy and recreate the local database volume
 build: ## Build all binaries into ./bin
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/ ./cmd/...
 
+.PHONY: docker
+docker: ## Build the container image (webevent:$(VERSION))
+	docker build --build-arg VERSION=$(VERSION) -t webevent:$(VERSION) .
+
+.PHONY: compose-up
+compose-up: ## Run Postgres + server in Docker
+	docker compose --profile app up -d --build
+
 .PHONY: run
 run: ## Run the server locally
 	go run ./cmd/webevent-server serve

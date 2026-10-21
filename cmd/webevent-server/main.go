@@ -3,8 +3,9 @@
 // Usage:
 //
 //	webevent-server [serve]   run the API and delivery workers (default)
-//	webevent-server migrate   apply database migrations and exit
-//	webevent-server version   print the version and exit
+//	webevent-server migrate      apply database migrations and exit
+//	webevent-server healthcheck  exit 0 if the local server is ready (for Docker HEALTHCHECK)
+//	webevent-server version      print the version and exit
 package main
 
 import (
@@ -16,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -25,6 +27,7 @@ import (
 	"github.com/GarineSaiAjay/webevent/internal/delivery"
 	"github.com/GarineSaiAjay/webevent/internal/logging"
 	"github.com/GarineSaiAjay/webevent/internal/observability"
+	"github.com/GarineSaiAjay/webevent/internal/retention"
 	"github.com/GarineSaiAjay/webevent/internal/secrets"
 	"github.com/GarineSaiAjay/webevent/internal/store"
 )
@@ -44,9 +47,12 @@ func run() error {
 	if len(os.Args) > 1 {
 		cmd = os.Args[1]
 	}
-	if cmd == "version" {
+	switch cmd {
+	case "version":
 		fmt.Println(version)
 		return nil
+	case "healthcheck":
+		return healthcheck()
 	}
 
 	cfg, err := config.Load()
@@ -66,6 +72,38 @@ func run() error {
 	default:
 		return fmt.Errorf("unknown command %q (want serve, migrate or version)", cmd)
 	}
+}
+
+// healthcheck probes /readyz on the local listener. Distroless images have no
+// curl or wget, so the binary checks itself. It deliberately reads only
+// WEBEVENT_HTTP_ADDR, not the full (secret-bearing) configuration.
+func healthcheck() error {
+	addr := os.Getenv("WEBEVENT_HTTP_ADDR")
+	if addr == "" {
+		addr = ":8080"
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+net.JoinHostPort(host, port)+"/readyz", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("not ready: HTTP %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func migrate(ctx context.Context, cfg config.Config, log *slog.Logger) error {
@@ -166,6 +204,14 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		close(workerDone)
 	}
 
+	if cfg.Retention > 0 {
+		go retention.Run(ctx, retention.Options{
+			Pool: pool, Logger: log.With("component", "retention"),
+			Keep: cfg.Retention, Interval: 10 * time.Minute, BatchSize: 1000,
+		})
+	}
+
+	draining := &atomic.Bool{}
 	handler := api.New(api.Options{
 		Logger:               log,
 		Store:                st,
@@ -173,6 +219,7 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		Version:              version,
 		AllowPrivateNetworks: cfg.AllowPrivateNetworks,
 		Metrics:              metrics,
+		Draining:             draining,
 	})
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -199,6 +246,13 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	case <-ctx.Done():
 	}
 
+	// Report not-ready and keep serving for a moment so the load balancer
+	// (e.g. a Kubernetes Service) stops routing new requests to us first.
+	draining.Store(true)
+	if cfg.ShutdownDelay > 0 {
+		log.Info("draining before shutdown", "delay", cfg.ShutdownDelay)
+		time.Sleep(cfg.ShutdownDelay)
+	}
 	log.Info("shutting down", "timeout", cfg.ShutdownTimeout)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()

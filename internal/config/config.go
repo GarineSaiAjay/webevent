@@ -23,7 +23,12 @@ type Config struct {
 	LogFormat       string // "json" or "text"
 	AutoMigrate     bool
 	ShutdownTimeout time.Duration
-	APIKeys         []string
+	// ShutdownDelay keeps serving (while reporting not-ready) for this long
+	// after SIGTERM, so load balancers stop routing to us first.
+	ShutdownDelay time.Duration
+	// Retention is how long events are kept (0 = forever).
+	Retention time.Duration
+	APIKeys   []string
 
 	// Delivery
 	WorkerEnabled      bool
@@ -64,6 +69,8 @@ func FromLookup(lookup func(string) (string, bool)) (Config, error) {
 		LogFormat:       r.str("WEBEVENT_LOG_FORMAT", "json"),
 		AutoMigrate:     r.bool("WEBEVENT_AUTO_MIGRATE", true),
 		ShutdownTimeout: r.duration("WEBEVENT_SHUTDOWN_TIMEOUT", 30*time.Second),
+		ShutdownDelay:   r.duration("WEBEVENT_SHUTDOWN_DELAY", 0),
+		Retention:       r.duration("WEBEVENT_RETENTION", 30*24*time.Hour),
 		APIKeys:         r.list("WEBEVENT_API_KEYS"),
 
 		WorkerEnabled:      r.bool("WEBEVENT_WORKER_ENABLED", true),
@@ -111,6 +118,12 @@ func (c Config) Validate() error {
 	}
 	if c.DeliveryTimeout < time.Second || c.DeliveryTimeout > 5*time.Minute {
 		errs = append(errs, errors.New("WEBEVENT_DELIVERY_TIMEOUT must be between 1s and 5m"))
+	}
+	if c.ShutdownDelay < 0 || c.ShutdownDelay > time.Minute {
+		errs = append(errs, errors.New("WEBEVENT_SHUTDOWN_DELAY must be between 0 and 1m"))
+	}
+	if c.Retention != 0 && c.Retention < time.Hour {
+		errs = append(errs, errors.New("WEBEVENT_RETENTION must be 0 (keep forever) or at least 1h"))
 	}
 	if c.WorkerConcurrency < 1 || c.WorkerConcurrency > 1024 {
 		errs = append(errs, errors.New("WEBEVENT_WORKER_CONCURRENCY must be between 1 and 1024"))

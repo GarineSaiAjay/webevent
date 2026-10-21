@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GarineSaiAjay/webevent/internal/api"
@@ -116,5 +117,27 @@ func TestMetricsUseRoutePatterns(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected a sample labelled with the route pattern, not the raw path")
+	}
+}
+
+func TestReadyzReportsDraining(t *testing.T) {
+	draining := &atomic.Bool{}
+	h := api.New(api.Options{Logger: logging.Discard(), Store: store.New(testutil.NewDB(t)), Draining: draining})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	draining.Store(true)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("draining status = %d, want 503", rec.Code)
+	}
+	// Liveness is unaffected: the process is healthy, just leaving.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("healthz while draining = %d", rec.Code)
 	}
 }

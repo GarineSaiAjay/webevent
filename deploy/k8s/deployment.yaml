@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webevent
+  namespace: webevent
+  labels: { app: webevent }
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels: { app: webevent }
+  template:
+    metadata:
+      labels: { app: webevent }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: /metrics
+    spec:
+      # Must exceed WEBEVENT_SHUTDOWN_DELAY + WEBEVENT_SHUTDOWN_TIMEOUT so
+      # in-flight deliveries finish before Kubernetes sends SIGKILL.
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: webevent }
+      containers:
+        - name: webevent
+          image: ghcr.io/garinesaiajay/webevent:1.0.0
+          args: ["serve"]
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: admin, containerPort: 9090 }
+          envFrom:
+            - secretRef: { name: webevent }
+          env:
+            - { name: WEBEVENT_AUTO_MIGRATE, value: "false" } # the migrate Job does it
+            - { name: WEBEVENT_SHUTDOWN_DELAY, value: "5s" }
+            - { name: WEBEVENT_SHUTDOWN_TIMEOUT, value: "35s" }
+            - { name: WEBEVENT_WORKER_CONCURRENCY, value: "64" }
+            - { name: WEBEVENT_DB_MAX_CONNS, value: "20" }
+            - { name: GOMEMLIMIT, value: "450MiB" }
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          startupProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }

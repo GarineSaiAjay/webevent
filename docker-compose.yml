@@ -1,3 +1,7 @@
+# Local development stack.
+#
+#   docker compose up -d postgres            # just the database (make db-up)
+#   docker compose --profile app up -d --build   # database + server
 services:
   postgres:
     image: postgres:16-alpine
@@ -14,6 +18,28 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+
+  webevent:
+    profiles: ["app"]
+    build:
+      context: .
+      args:
+        VERSION: compose
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      WEBEVENT_DATABASE_URL: postgres://webevent:webevent@postgres:5432/webevent?sslmode=disable
+      WEBEVENT_API_KEYS: dev-key-change-me-0123456789abcdef0123456789
+      WEBEVENT_LOG_FORMAT: text
+      # Lets endpoints point at other containers / your host while developing.
+      WEBEVENT_ALLOW_PRIVATE_NETWORKS: "true"
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
 
 volumes:
   pgdata:

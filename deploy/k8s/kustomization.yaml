@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - deployment.yaml
+  - service.yaml
+  - pdb.yaml
+# secret.yaml and migrate-job.yaml are applied separately (see docs/RUNBOOK.md).
+images:
+  - name: ghcr.io/garinesaiajay/webevent
+    newTag: 1.0.0

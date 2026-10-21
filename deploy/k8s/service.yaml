@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: webevent
+  namespace: webevent
+spec:
+  selector: { app: webevent }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+# The admin port (9090) is deliberately NOT exposed by the Service:
+# Prometheus scrapes pods directly; pprof must stay internal.
