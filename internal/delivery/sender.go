@@ -13,6 +13,9 @@ import (
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+
 	"github.com/GarineSaiAjay/webevent/internal/netguard"
 	"github.com/GarineSaiAjay/webevent/internal/store"
 	"github.com/GarineSaiAjay/webevent/pkg/webhook"
@@ -118,6 +121,9 @@ func (s *Sender) Send(ctx context.Context, j store.Job) store.AttemptResult {
 	if err := webhook.SetHeaders(req.Header, j.EventID, s.now(), body, j.Secrets...); err != nil {
 		return fail("sign: "+err.Error(), true)
 	}
+	// Propagate our trace (traceparent header) so receivers that use
+	// OpenTelemetry can continue it.
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 
 	resp, err := s.client.Do(req)
 	if err != nil {

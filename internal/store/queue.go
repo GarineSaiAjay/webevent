@@ -146,7 +146,8 @@ func (s *Store) claimForEndpoint(ctx context.Context, tx pgx.Tx, endpointID stri
 		RETURNING d.id, d.attempt_count, d.attempt_count - d.attempt_offset,
 		          e.id, e.event_type, e.payload, e.created_at, ep.id, ep.url, d.lease_token,
 		          ep.secret,
-		          CASE WHEN ep.previous_secret_expires_at > now() THEN ep.previous_secret END`,
+		          CASE WHEN ep.previous_secret_expires_at > now() THEN ep.previous_secret END,
+		          COALESCE(e.trace_parent, '')`,
 		endpointID, n, workerID, token, leaseFor.Seconds())
 	if err != nil {
 		return nil, err
@@ -156,7 +157,7 @@ func (s *Store) claimForEndpoint(ctx context.Context, tx pgx.Tx, endpointID stri
 		var current string
 		var previous *string
 		err := row.Scan(&j.DeliveryID, &j.AttemptNumber, &j.RetryAttempt, &j.EventID, &j.EventType, &j.Payload,
-			&j.EventCreatedAt, &j.EndpointID, &j.URL, &j.LeaseToken, &current, &previous)
+			&j.EventCreatedAt, &j.EndpointID, &j.URL, &j.LeaseToken, &current, &previous, &j.TraceParent)
 		if err != nil {
 			return j, err
 		}

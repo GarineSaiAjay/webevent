@@ -10,6 +10,14 @@ import (
 	"regexp"
 	"runtime/debug"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/GarineSaiAjay/webevent/internal/observability"
 )
 
 type ctxKey int
@@ -66,28 +74,61 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 // (needed later for flushing streamed responses).
 func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
-// accessLog writes one structured line per request.
-func accessLog(log *slog.Logger) func(http.Handler) http.Handler {
+// observe is the per-request instrumentation: it starts a server span
+// (continuing the caller's trace if it sent a traceparent header), records
+// Prometheus metrics, and writes one structured access-log line that
+// includes the trace id so logs and traces can be joined.
+func observe(log *slog.Logger, metrics *observability.Metrics) func(http.Handler) http.Handler {
+	tracer := observability.Tracer()
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
+			ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+			ctx, span := tracer.Start(ctx, "HTTP "+r.Method, trace.WithSpanKind(trace.SpanKindServer))
+			defer span.End()
+			r = r.WithContext(ctx)
+
 			rec := &statusRecorder{ResponseWriter: w}
 			next.ServeHTTP(rec, r)
 			if rec.status == 0 {
 				rec.status = http.StatusOK
 			}
+
+			// r.Pattern is filled in by ServeMux once a route matched, e.g.
+			// "GET /v1/endpoints/{id}". Using it (not r.URL.Path) keeps metric
+			// labels and span names low-cardinality.
+			route := r.Pattern
+			if route != "" {
+				span.SetName(route)
+			}
+			span.SetAttributes(
+				attribute.String("http.request.method", r.Method),
+				attribute.String("http.route", route),
+				attribute.Int("http.response.status_code", rec.status),
+				attribute.String("webevent.request_id", RequestIDFrom(ctx)),
+			)
+			if rec.status >= 500 {
+				span.SetStatus(codes.Error, http.StatusText(rec.status))
+			}
+			metrics.ObserveHTTP(r.Method, route, rec.status, time.Since(start))
+
 			level := slog.LevelInfo
 			if rec.status >= 500 {
 				level = slog.LevelError
 			}
-			log.Log(r.Context(), level, "http request",
+			attrs := []any{
 				"method", r.Method,
 				"path", r.URL.Path,
+				"route", route,
 				"status", rec.status,
 				"bytes", rec.bytes,
 				"duration_ms", time.Since(start).Milliseconds(),
-				"request_id", RequestIDFrom(r.Context()),
-			)
+				"request_id", RequestIDFrom(ctx),
+			}
+			if sc := span.SpanContext(); sc.IsValid() {
+				attrs = append(attrs, "trace_id", sc.TraceID().String())
+			}
+			log.Log(ctx, level, "http request", attrs...)
 		})
 	}
 }

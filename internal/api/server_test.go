@@ -8,6 +8,7 @@ import (
 
 	"github.com/GarineSaiAjay/webevent/internal/api"
 	"github.com/GarineSaiAjay/webevent/internal/logging"
+	"github.com/GarineSaiAjay/webevent/internal/observability"
 	"github.com/GarineSaiAjay/webevent/internal/store"
 	"github.com/GarineSaiAjay/webevent/internal/testutil"
 )
@@ -84,5 +85,36 @@ func TestReadyzWithDatabase(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("after closing pool status = %d, want 503", rec.Code)
+	}
+}
+
+func TestMetricsUseRoutePatterns(t *testing.T) {
+	m := observability.NewMetrics()
+	st := store.New(testutil.NewDB(t))
+	h := api.New(api.Options{Logger: logging.Discard(), Store: st, APIKeys: []string{testAPIKey}, Metrics: m})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/endpoints/ep_00000000000000000000000000", nil)
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	families, err := m.Registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range families {
+		if f.GetName() != "webevent_http_requests_total" {
+			continue
+		}
+		for _, metric := range f.GetMetric() {
+			for _, l := range metric.GetLabel() {
+				if l.GetName() == "route" && l.GetValue() == "GET /v1/endpoints/{id}" {
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected a sample labelled with the route pattern, not the raw path")
 	}
 }

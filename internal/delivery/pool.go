@@ -10,6 +10,11 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/GarineSaiAjay/webevent/internal/observability"
 	"github.com/GarineSaiAjay/webevent/internal/store"
 )
 
@@ -37,6 +42,8 @@ type PoolOptions struct {
 	Wake <-chan struct{}
 	// WorkerID identifies this process in leases. Generated if empty.
 	WorkerID string
+	// Metrics may be nil.
+	Metrics *observability.Metrics
 }
 
 // Pool runs many deliveries concurrently. Any number of Pools, in any number
@@ -112,10 +119,12 @@ func (p *Pool) Run(ctx context.Context) {
 
 		claimedFull := false
 		if free := p.o.Concurrency - inFlight; free > 0 && ctx.Err() == nil {
+			claimStart := time.Now()
 			jobs, err := p.o.Store.ClaimJobs(ctx, p.o.WorkerID, free, p.o.LeaseDuration)
 			if err != nil && ctx.Err() == nil {
 				p.log.Error("claim deliveries", "err", err)
 			}
+			p.o.Metrics.Claimed(len(jobs), time.Since(claimStart))
 			for _, job := range jobs {
 				inFlight++
 				wg.Add(1)
@@ -181,6 +190,7 @@ func (p *Pool) reapLoop(ctx context.Context) {
 			p.log.Error("reap expired leases", "err", err)
 		}
 		if n > 0 {
+			p.o.Metrics.Reaped(n)
 			p.log.Warn("recovered deliveries with expired leases", "count", n)
 		}
 	}
@@ -188,8 +198,31 @@ func (p *Pool) reapLoop(ctx context.Context) {
 
 // process performs one attempt and records the outcome.
 func (p *Pool) process(ctx context.Context, job store.Job) {
+	p.o.Metrics.InFlight(1)
+	defer p.o.Metrics.InFlight(-1)
+
+	// The delivery runs long after (and outside) the request that created
+	// the event, so it is not a child of that span but LINKED to it.
+	var opts []trace.SpanStartOption
+	if sc := observability.SpanContextFromTraceParent(job.TraceParent); sc.IsValid() {
+		opts = append(opts, trace.WithLinks(trace.Link{SpanContext: sc}))
+	}
+	opts = append(opts, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(
+		attribute.String("webevent.delivery_id", job.DeliveryID),
+		attribute.String("webevent.event_id", job.EventID),
+		attribute.String("webevent.event_type", job.EventType),
+		attribute.String("webevent.endpoint_id", job.EndpointID),
+		attribute.Int("webevent.attempt", job.AttemptNumber),
+	))
+	ctx, span := observability.Tracer().Start(ctx, "webhook.deliver", opts...)
+	defer span.End()
+
 	res := p.o.Sender.Send(ctx, job)
 	dec := p.o.Policy.Decide(job.RetryAttempt, res)
+	span.SetAttributes(attribute.Int("http.response.status_code", res.StatusCode), attribute.String("webevent.outcome", outcomeName(dec.Outcome)))
+	if dec.Outcome != store.OutcomeSucceeded {
+		span.SetStatus(codes.Error, res.Error)
+	}
 
 	recordCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -198,7 +231,8 @@ func (p *Pool) process(ctx context.Context, job store.Job) {
 	})
 
 	log := p.log.With("delivery_id", job.DeliveryID, "event_id", job.EventID, "endpoint_id", job.EndpointID,
-		"attempt", job.AttemptNumber, "status_code", res.StatusCode, "duration_ms", res.Duration.Milliseconds())
+		"attempt", job.AttemptNumber, "status_code", res.StatusCode, "duration_ms", res.Duration.Milliseconds(),
+		"trace_id", span.SpanContext().TraceID().String())
 	if err != nil {
 		// The lease will expire and the reaper will retry the delivery.
 		log.Error("record attempt", "err", err)
@@ -208,6 +242,7 @@ func (p *Pool) process(ctx context.Context, job store.Job) {
 		log.Warn("lost ownership of delivery (lease expired or endpoint deleted); result not applied")
 		return
 	}
+	p.o.Metrics.Attempt(outcomeName(dec.Outcome), res.Duration)
 	switch dec.Outcome {
 	case store.OutcomeSucceeded:
 		log.Info("delivery succeeded")
@@ -217,6 +252,19 @@ func (p *Pool) process(ctx context.Context, job store.Job) {
 		log.Error("delivery dead-lettered", "err", res.Error, "reason", dec.Reason)
 	}
 	if rr.EndpointDisabled {
+		p.o.Metrics.EndpointDisabled()
 		log.Error("endpoint disabled after repeated dead deliveries", "threshold", p.o.DisableEndpointAfter)
 	}
+}
+
+func outcomeName(o store.Outcome) string {
+	switch o {
+	case store.OutcomeSucceeded:
+		return "succeeded"
+	case store.OutcomeRetry:
+		return "retry"
+	case store.OutcomeDead:
+		return "dead"
+	}
+	return "unknown"
 }

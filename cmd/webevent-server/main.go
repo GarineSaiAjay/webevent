@@ -24,6 +24,7 @@ import (
 	"github.com/GarineSaiAjay/webevent/internal/db"
 	"github.com/GarineSaiAjay/webevent/internal/delivery"
 	"github.com/GarineSaiAjay/webevent/internal/logging"
+	"github.com/GarineSaiAjay/webevent/internal/observability"
 	"github.com/GarineSaiAjay/webevent/internal/secrets"
 	"github.com/GarineSaiAjay/webevent/internal/store"
 )
@@ -109,6 +110,30 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	}
 	st := store.New(pool, store.WithSecretBox(box))
 
+	// Observability: metrics are always collected; tracing exports only when
+	// OTEL_EXPORTER_OTLP_ENDPOINT is set.
+	metrics := observability.NewMetrics()
+	metrics.RegisterQueueCollector(pool, 10*time.Second, log)
+	shutdownTracing, err := observability.SetupTracing(ctx, "webevent", version)
+	if err != nil {
+		return fmt.Errorf("tracing: %w", err)
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(flushCtx)
+	}()
+	if cfg.AdminAddr != "off" {
+		admin := &http.Server{Addr: cfg.AdminAddr, Handler: observability.AdminHandler(metrics), ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			log.Info("admin server listening (metrics, pprof)", "addr", cfg.AdminAddr)
+			if err := admin.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("admin server", "err", err)
+			}
+		}()
+		defer func() { _ = admin.Close() }()
+	}
+
 	// Delivery workers run until ctx is cancelled (SIGINT/SIGTERM), then
 	// drain in-flight deliveries. API-only replicas set WEBEVENT_WORKER_ENABLED=false.
 	workerDone := make(chan struct{})
@@ -128,6 +153,7 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 			ReapInterval:         cfg.ReapInterval,
 			DisableEndpointAfter: cfg.EndpointDisableAfter,
 			Wake:                 delivery.Listen(ctx, pool, log.With("component", "listener")),
+			Metrics:              metrics,
 		})
 		if err != nil {
 			return err
@@ -146,6 +172,7 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		APIKeys:              cfg.APIKeys,
 		Version:              version,
 		AllowPrivateNetworks: cfg.AllowPrivateNetworks,
+		Metrics:              metrics,
 	})
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
