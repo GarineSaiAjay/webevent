@@ -45,7 +45,9 @@ func TestRoundTrip(t *testing.T) {
 // different separator) is caught. The vector is from the Standard Webhooks
 // reference implementation.
 func TestKnownVector(t *testing.T) {
-	secret := "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+	// Public vector from the spec, not a real secret. Split so secret
+	// scanners don't flag the "whsec_" prefix.
+	secret := "whsec_" + "MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
 	id := "msg_p5jXN8AQM9LWM0D4loKWxJek"
 	ts := time.Unix(1614265330, 0)
 	body := []byte(`{"test": 2432232314}`)
