@@ -194,12 +194,22 @@ func (s *Store) UpdateEndpoint(ctx context.Context, endpointID string, p Endpoin
 // DeleteEndpoint soft-deletes an endpoint and cancels its pending deliveries
 // in the same transaction.
 //
-// Ordering matters: we lock the endpoint row first. CreateEvent holds a FOR
-// SHARE lock on endpoints it fans out to, so this UPDATE waits for any
-// in-flight fan-out to commit. The second statement then runs with a fresh
-// snapshot (READ COMMITTED) and sees, and cancels, those new deliveries too.
+// Ordering matters: we first lock the endpoint row FOR UPDATE, the one lock
+// mode that conflicts with the FOR KEY SHARE locks CreateEvent holds on the
+// endpoints it fans out to. So we wait for any in-flight fan-out to commit;
+// the cancelling statement then runs with a fresh snapshot (READ COMMITTED)
+// and sees, and cancels, those new deliveries too. Fan-outs that start after
+// our commit re-check deleted_at and skip the endpoint.
 func (s *Store) DeleteEndpoint(ctx context.Context, endpointID string) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		var found string
+		err := tx.QueryRow(ctx, `
+			SELECT id FROM endpoints
+			WHERE id = $1 AND deleted_at IS NULL
+			FOR UPDATE`, endpointID).Scan(&found)
+		if err != nil {
+			return notFoundIfNoRows(err)
+		}
 		tag, err := tx.Exec(ctx, `
 			UPDATE endpoints SET deleted_at = now()
 			WHERE id = $1 AND deleted_at IS NULL`, endpointID)

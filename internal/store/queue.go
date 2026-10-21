@@ -22,11 +22,13 @@ const NotifyChannel = "webevent_work"
 // It runs in a single transaction, in three steps:
 //
 //  1. Lock up to maxCandidates active endpoints that have due work, in
-//     round-robin order (least recently visited first), with FOR UPDATE SKIP
-//     LOCKED, then read their in-flight counts and token buckets. Holding
-//     the endpoint row lock means no other claimer can look at the same
-//     endpoint at the same time, so the per-endpoint limits hold across
-//     every worker and process.
+//     round-robin order (least recently visited first), with FOR NO KEY
+//     UPDATE SKIP LOCKED, then read their in-flight counts and token
+//     buckets. Holding the endpoint row lock means no other claimer can look
+//     at the same endpoint at the same time, so the per-endpoint limits hold
+//     across every worker and process. NO KEY UPDATE (rather than FOR
+//     UPDATE) matters: it does not conflict with the FOR KEY SHARE locks that
+//     event fan-out takes, so publishers and claimers never block each other.
 //  2. Decide in Go how many deliveries each endpoint may start now:
 //     min(max_in_flight - in_flight, available rate-limit tokens), then share
 //     the free worker slots fairly between endpoints (see allocate).
@@ -58,7 +60,7 @@ func (s *Store) ClaimJobs(ctx context.Context, workerID string, limit int, lease
 			              WHERE d.endpoint_id = ep.id AND d.status = 'pending' AND d.next_attempt_at <= now())
 			ORDER BY ep.last_claimed_at NULLS FIRST
 			LIMIT $1
-			FOR UPDATE OF ep SKIP LOCKED`, maxCandidates(limit))
+			FOR NO KEY UPDATE OF ep SKIP LOCKED`, maxCandidates(limit))
 		if err != nil {
 			return err
 		}

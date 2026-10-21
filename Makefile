@@ -41,6 +41,21 @@ migrate: ## Apply migrations and exit
 test: ## Run all tests (unit + integration) with the race detector
 	WEBEVENT_TEST_DATABASE_URL="$(TEST_DB)" go test -race -count=1 ./...
 
+.PHONY: test-e2e
+test-e2e: ## Run end-to-end tests against the real server binary (slow)
+	WEBEVENT_TEST_DATABASE_URL="$(TEST_DB)" go test -race -count=1 -tags e2e -timeout 15m ./test/e2e/...
+
+.PHONY: fuzz
+fuzz: ## Run each fuzz target for 30s
+	go test -run XXX -fuzz FuzzVerifyNeverPanics -fuzztime 30s ./pkg/webhook
+	go test -run XXX -fuzz FuzzValidateEndpointURL -fuzztime 30s ./internal/api
+	go test -run XXX -fuzz FuzzNormalizeEventTypes -fuzztime 30s ./internal/api
+	go test -run XXX -fuzz FuzzIdempotencyKey -fuzztime 30s ./internal/api
+
+.PHONY: bench
+bench: ## Run database benchmarks
+	WEBEVENT_TEST_DATABASE_URL="$(TEST_DB)" go test -run XXX -bench . -benchtime 3s ./internal/store
+
 .PHONY: test-unit
 test-unit: ## Run tests that need no database
 	WEBEVENT_TEST_DATABASE_URL= go test -race -count=1 ./...
