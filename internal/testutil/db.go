@@ -46,6 +46,12 @@ func NewEmptyDB(t testing.TB) *pgxpool.Pool {
 	return pool
 }
 
+// NewEmptyDBWithURL is NewEmptyDB plus the connection string.
+func NewEmptyDBWithURL(t testing.TB) (*pgxpool.Pool, string) {
+	t.Helper()
+	return newDB(t, false)
+}
+
 func newDB(t testing.TB, migrate bool) (*pgxpool.Pool, string) {
 	t.Helper()
 	adminURL := os.Getenv(EnvTestDatabaseURL)

@@ -98,15 +98,18 @@ func (s *Store) CreateEvent(ctx context.Context, in NewEvent) (CreateEventResult
 		}
 		res.Event = ev
 
-		// Lock the matching endpoints FOR SHARE so a concurrent delete waits
-		// for us (and then sees and cancels our deliveries) instead of racing.
+		// Lock the matching endpoints FOR KEY SHARE so a concurrent delete
+		// (which takes FOR UPDATE) waits for us and then sees, and cancels,
+		// our deliveries. KEY SHARE is the weakest row lock: it does NOT
+		// conflict with the FOR NO KEY UPDATE locks that claimers take, so
+		// heavy ingest never blocks delivery (see contention_test.go).
 		rows, err = tx.Query(ctx, `
 			SELECT id FROM endpoints
 			WHERE deleted_at IS NULL
 			  AND status IN ('active', 'paused')
 			  AND event_types && ARRAY[$1, '*']::text[]
 			ORDER BY id
-			FOR SHARE`, in.EventType)
+			FOR KEY SHARE`, in.EventType)
 		if err != nil {
 			return err
 		}

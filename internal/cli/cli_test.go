@@ -201,3 +201,85 @@ func TestHealth(t *testing.T) {
 		t.Fatalf("health output %q", out)
 	}
 }
+
+// runCtx is run with a caller-supplied context (for --follow).
+func (h *harness) runCtx(ctx context.Context, args ...string) (string, string, int) {
+	h.t.Helper()
+	var out, errOut bytes.Buffer
+	env := cli.Env{Stdin: strings.NewReader(""), Stdout: &out, Stderr: &errOut, Getenv: func(k string) string { return h.env[k] }}
+	code := cli.Execute(ctx, env, "test", args)
+	return out.String(), errOut.String(), code
+}
+
+func (h *harness) attempt(status int, outcome store.Outcome) store.Job {
+	h.t.Helper()
+	ctx := context.Background()
+	jobs, err := h.store.ClaimJobs(ctx, "w", 1, time.Minute)
+	if err != nil || len(jobs) != 1 {
+		h.t.Fatalf("claim: %v %v", jobs, err)
+	}
+	if _, err := h.store.RecordAttempt(ctx, store.AttemptRecord{
+		Job: jobs[0], Result: store.AttemptResult{StatusCode: status, Error: "x"}, Outcome: outcome,
+	}); err != nil {
+		h.t.Fatal(err)
+	}
+	return jobs[0]
+}
+
+func TestLogsFollowStreamsNewAttempts(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	if _, err := h.store.CreateEndpoint(ctx, store.NewEndpoint{URL: "https://example.com/h", EventTypes: []string{"*"}}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := h.store.CreateEvent(ctx, store.NewEvent{EventType: "follow.me", Payload: []byte(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := h.attempt(500, store.OutcomeRetry)
+
+	runCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+	defer cancel()
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		h.attempt(201, store.OutcomeSucceeded) // happens while following
+	}()
+	out, errOut, code := h.runCtx(runCtx, "logs", "--follow", "--interval", "100ms")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	if !strings.Contains(out, first.DeliveryID) || !strings.Contains(out, " 201 ") || strings.Count(out, "TIME") != 1 {
+		t.Fatalf("follow output:\n%s", out)
+	}
+}
+
+func TestReplayAndEventCommands(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	ep, _ := h.store.CreateEndpoint(ctx, store.NewEndpoint{URL: "https://example.com/h", EventTypes: []string{"*"}})
+	res, _ := h.store.CreateEvent(ctx, store.NewEvent{EventType: "replay.me", Payload: []byte(`{"a":1}`)})
+	dead := h.attempt(500, store.OutcomeDead)
+
+	if out := h.mustRun("events", "get", res.Event.ID); !strings.Contains(out, `"a": 1`) || !strings.Contains(out, "dead") {
+		t.Fatalf("events get:\n%s", out)
+	}
+	if out := h.mustRun("deliveries", "replay", dead.DeliveryID); !strings.Contains(out, "replay #1") {
+		t.Fatalf("deliveries replay: %q", out)
+	}
+	h.attempt(500, store.OutcomeDead)
+	if out := h.mustRun("endpoints", "replay", ep.ID, "--since", "1h"); !strings.Contains(out, "re-queued 1 dead") {
+		t.Fatalf("endpoints replay: %q", out)
+	}
+	if out := h.mustRun("endpoints", "rotate-secret", ep.ID, "--grace", "1h"); !strings.Contains(out, "whsec_") {
+		t.Fatalf("rotate: %q", out)
+	}
+	if out := h.mustRun("endpoints", "get", ep.ID); !strings.Contains(out, ep.URL) {
+		t.Fatalf("get: %q", out)
+	}
+	h.mustRun("endpoints", "delete", ep.ID)
+	_, errOut, code := h.run("", "endpoints", "replay", ep.ID, "--since", "not-a-time")
+	if code != 1 || !strings.Contains(errOut, "--since") {
+		t.Fatalf("bad --since: %q", errOut)
+	}
+}
