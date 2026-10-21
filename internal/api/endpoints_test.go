@@ -276,3 +276,34 @@ func TestPrivateURLsRejected(t *testing.T) {
 		expectStatus(t, rec, http.StatusUnprocessableEntity)
 	}
 }
+
+func TestEndpointLimits(t *testing.T) {
+	a := newTestAPI(t)
+	rec := a.do(http.MethodPost, "/v1/endpoints", map[string]any{
+		"url": "https://example.com/h", "event_types": []string{"*"}, "rate_limit_per_sec": 20, "max_in_flight": 4,
+	})
+	expectStatus(t, rec, http.StatusCreated)
+	ep := decode[store.Endpoint](t, rec)
+	if ep.RateLimitPerSec == nil || *ep.RateLimitPerSec != 20 || ep.MaxInFlight != 4 {
+		t.Fatalf("limits not stored: %+v", ep)
+	}
+
+	// Defaults: unlimited rate, 10 in flight.
+	def := createEndpoint(t, a, "https://example.com/d")
+	if def.RateLimitPerSec != nil || def.MaxInFlight != 10 {
+		t.Fatalf("defaults = %+v", def)
+	}
+
+	// 0 removes the rate limit.
+	rec = a.do(http.MethodPatch, "/v1/endpoints/"+ep.ID, map[string]any{"rate_limit_per_sec": 0})
+	expectStatus(t, rec, http.StatusOK)
+	if got := decode[store.Endpoint](t, rec); got.RateLimitPerSec != nil || got.MaxInFlight != 4 {
+		t.Fatalf("after removing limit: %+v", got)
+	}
+
+	for _, body := range []map[string]any{
+		{"rate_limit_per_sec": -1}, {"rate_limit_per_sec": 10001}, {"max_in_flight": 0}, {"max_in_flight": 5000},
+	} {
+		expectStatus(t, a.do(http.MethodPatch, "/v1/endpoints/"+ep.ID, body), http.StatusUnprocessableEntity)
+	}
+}

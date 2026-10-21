@@ -74,7 +74,8 @@ func TestManyPoolsDeliverEachEventExactlyOnce(t *testing.T) {
 func TestConcurrentClaimsNeverOverlap(t *testing.T) {
 	st := newStore(t)
 	ctx := context.Background()
-	if _, err := st.CreateEndpoint(ctx, store.NewEndpoint{URL: "http://127.0.0.1:1", EventTypes: []string{"*"}}); err != nil {
+	// A high max_in_flight so the per-endpoint cap does not limit this test.
+	if _, err := st.CreateEndpoint(ctx, store.NewEndpoint{URL: "http://127.0.0.1:1", EventTypes: []string{"*"}, MaxInFlight: 1000}); err != nil {
 		t.Fatal(err)
 	}
 	const total = 200
@@ -86,18 +87,23 @@ func TestConcurrentClaimsNeverOverlap(t *testing.T) {
 
 	var mu sync.Mutex
 	claimed := map[string]string{}
+	remaining := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return total - len(claimed)
+	}
+	deadline := time.Now().Add(20 * time.Second)
 	var wg sync.WaitGroup
 	for w := 0; w < 10; w++ {
 		wg.Add(1)
 		go func(worker string) {
 			defer wg.Done()
-			for {
+			// An empty claim can just mean another worker holds the endpoint
+			// row right now (SKIP LOCKED), so keep going until all is claimed.
+			for remaining() > 0 && time.Now().Before(deadline) {
 				jobs, err := st.ClaimJobs(ctx, worker, 7, time.Minute)
 				if err != nil {
 					t.Error(err)
-					return
-				}
-				if len(jobs) == 0 {
 					return
 				}
 				mu.Lock()

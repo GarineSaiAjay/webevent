@@ -11,9 +11,20 @@ import (
 )
 
 type createEndpointRequest struct {
-	URL         string   `json:"url"`
-	Description string   `json:"description"`
-	EventTypes  []string `json:"event_types"`
+	URL             string   `json:"url"`
+	Description     string   `json:"description"`
+	EventTypes      []string `json:"event_types"`
+	RateLimitPerSec *int     `json:"rate_limit_per_sec"`
+	MaxInFlight     *int     `json:"max_in_flight"`
+}
+
+func validateLimits(rate, inFlight *int, fields map[string]string) {
+	if rate != nil && (*rate < 0 || *rate > 10000) {
+		fields["rate_limit_per_sec"] = "must be between 1 and 10000 (0 or null for unlimited)"
+	}
+	if inFlight != nil && (*inFlight < 1 || *inFlight > 1000) {
+		fields["max_in_flight"] = "must be between 1 and 1000"
+	}
 }
 
 func (s *Server) handleCreateEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -33,14 +44,17 @@ func (s *Server) handleCreateEndpoint(w http.ResponseWriter, r *http.Request) {
 	if msg != "" {
 		fields["event_types"] = msg
 	}
+	validateLimits(req.RateLimitPerSec, req.MaxInFlight, fields)
 	if len(fields) > 0 {
 		writeError(w, r, s.log, errValidation(fields))
 		return
 	}
 
-	ep, err := s.store.CreateEndpoint(r.Context(), store.NewEndpoint{
-		URL: req.URL, Description: req.Description, EventTypes: types,
-	})
+	in := store.NewEndpoint{URL: req.URL, Description: req.Description, EventTypes: types, RateLimitPerSec: req.RateLimitPerSec}
+	if req.MaxInFlight != nil {
+		in.MaxInFlight = *req.MaxInFlight
+	}
+	ep, err := s.store.CreateEndpoint(r.Context(), in)
 	if err != nil {
 		writeError(w, r, s.log, err)
 		return
@@ -81,10 +95,12 @@ func (s *Server) handleGetEndpoint(w http.ResponseWriter, r *http.Request) {
 
 // updateEndpointRequest uses pointers so we can tell "absent" from "empty".
 type updateEndpointRequest struct {
-	URL         *string   `json:"url"`
-	Description *string   `json:"description"`
-	EventTypes  *[]string `json:"event_types"`
-	Status      *string   `json:"status"`
+	URL             *string   `json:"url"`
+	Description     *string   `json:"description"`
+	EventTypes      *[]string `json:"event_types"`
+	Status          *string   `json:"status"`
+	RateLimitPerSec *int      `json:"rate_limit_per_sec"`
+	MaxInFlight     *int      `json:"max_in_flight"`
 }
 
 func (s *Server) handleUpdateEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -99,7 +115,11 @@ func (s *Server) handleUpdateEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fields := map[string]string{}
-	patch := store.EndpointPatch{URL: req.URL, Description: req.Description, Status: req.Status}
+	patch := store.EndpointPatch{
+		URL: req.URL, Description: req.Description, Status: req.Status,
+		RateLimitPerSec: req.RateLimitPerSec, MaxInFlight: req.MaxInFlight,
+	}
+	validateLimits(req.RateLimitPerSec, req.MaxInFlight, fields)
 	if req.URL != nil {
 		if msg := validateEndpointURL(*req.URL, s.allowPrivate); msg != "" {
 			fields["url"] = msg
@@ -198,12 +218,9 @@ func (s *Server) handleReplayEndpoint(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"replayed": n, "since": since.UTC(), "until": until.UTC()})
 }
 
-// Grace period applied to the old signing secret on rotation.
-const (
-	defaultSecretGrace = 24 * time.Hour
-	maxSecretGrace     = 7 * 24 * time.Hour
-)
-
+// handleGetEndpointSecret reveals the signing secret. It is a separate
+// call (not a field on GET /endpoints/{id}) so secrets never leak into
+// list responses or logs by accident.
 func (s *Server) handleGetEndpointSecret(w http.ResponseWriter, r *http.Request) {
 	epID := r.PathValue("id")
 	if !id.Valid(id.PrefixEndpoint, epID) {
@@ -222,9 +239,11 @@ func (s *Server) handleGetEndpointSecret(w http.ResponseWriter, r *http.Request)
 }
 
 type rotateSecretRequest struct {
-	// GracePeriod is a Go duration ("1h", "30m"); "0s" revokes the old secret now.
+	// GracePeriod is a Go duration string, e.g. "24h". Default 24h, max 7 days.
 	GracePeriod *string `json:"grace_period"`
 }
+
+const maxGracePeriod = 7 * 24 * time.Hour
 
 func (s *Server) handleRotateEndpointSecret(w http.ResponseWriter, r *http.Request) {
 	epID := r.PathValue("id")
@@ -239,18 +258,15 @@ func (s *Server) handleRotateEndpointSecret(w http.ResponseWriter, r *http.Reque
 			return
 		}
 	}
-	grace := defaultSecretGrace
+	grace := 24 * time.Hour
 	if req.GracePeriod != nil {
 		d, err := time.ParseDuration(*req.GracePeriod)
-		if err != nil || d < 0 || d > maxSecretGrace {
-			writeError(w, r, s.log, errValidation(map[string]string{
-				"grace_period": "must be a duration between 0s and " + maxSecretGrace.String() + ", e.g. \"1h\"",
-			}))
+		if err != nil || d < 0 || d > maxGracePeriod {
+			writeError(w, r, s.log, errValidation(map[string]string{"grace_period": "must be a duration between 0s and 168h"}))
 			return
 		}
 		grace = d
 	}
-
 	secret, err := s.store.RotateEndpointSecret(r.Context(), epID, grace)
 	if errors.Is(err, store.ErrNotFound) {
 		err = errNotFound("endpoint")
@@ -259,9 +275,8 @@ func (s *Server) handleRotateEndpointSecret(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, s.log, err)
 		return
 	}
-	resp := map[string]any{"secret": secret, "previous_secret_valid_until": nil}
-	if grace > 0 {
-		resp["previous_secret_valid_until"] = time.Now().Add(grace).UTC()
-	}
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"secret":                      secret,
+		"previous_secret_valid_until": time.Now().Add(grace).UTC().Truncate(time.Second),
+	})
 }
