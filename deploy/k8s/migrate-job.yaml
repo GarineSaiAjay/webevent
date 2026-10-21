@@ -1,0 +1,28 @@
+# Run before rolling out a new version:
+#   kubectl -n webevent delete job webevent-migrate --ignore-not-found
+#   kubectl apply -f deploy/k8s/migrate-job.yaml && kubectl -n webevent wait --for=condition=complete job/webevent-migrate
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: webevent-migrate
+  namespace: webevent
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: migrate
+          image: ghcr.io/garinesaiajay/webevent:1.0.0
+          args: ["migrate"]
+          envFrom:
+            - secretRef: { name: webevent }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }

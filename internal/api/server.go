@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/GarineSaiAjay/webevent/internal/observability"
@@ -22,6 +23,9 @@ type Options struct {
 	AllowPrivateNetworks bool
 	// Metrics may be nil.
 	Metrics *observability.Metrics
+	// Draining, when set to true, makes /readyz fail so load balancers
+	// stop sending traffic before the server shuts down. May be nil.
+	Draining *atomic.Bool
 }
 
 // Server holds handler dependencies.
@@ -32,6 +36,7 @@ type Server struct {
 	version      string
 	allowPrivate bool
 	metrics      *observability.Metrics
+	draining     *atomic.Bool
 }
 
 // New builds the API and returns its root handler.
@@ -44,6 +49,10 @@ func New(opts Options) http.Handler {
 
 		allowPrivate: opts.AllowPrivateNetworks,
 		metrics:      opts.Metrics,
+		draining:     opts.Draining,
+	}
+	if s.draining == nil {
+		s.draining = &atomic.Bool{}
 	}
 
 	// Unauthenticated operational routes.
@@ -88,6 +97,10 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 // handleReadyz is a readiness probe: we can reach the database. Load
 // balancers should only route traffic to ready instances.
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	if s.draining.Load() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "draining"})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	if err := s.store.Pool().Ping(ctx); err != nil {

@@ -185,3 +185,21 @@ func TestShutdownMustOutliveDeliveryTimeout(t *testing.T) {
 		t.Fatalf("expected shutdown validation error, got %v", err)
 	}
 }
+
+func TestRetentionAndShutdownDelay(t *testing.T) {
+	cfg, err := FromLookup(lookupFrom(map[string]string{"WEBEVENT_DATABASE_URL": "postgres://db/x"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Retention != 30*24*time.Hour || cfg.ShutdownDelay != 0 {
+		t.Fatalf("defaults: retention=%v delay=%v", cfg.Retention, cfg.ShutdownDelay)
+	}
+	cfg, err = FromLookup(lookupFrom(map[string]string{"WEBEVENT_DATABASE_URL": "postgres://db/x", "WEBEVENT_RETENTION": "0s"}))
+	if err != nil || cfg.Retention != 0 {
+		t.Fatalf("retention 0 must be allowed: %v %v", cfg.Retention, err)
+	}
+	_, err = FromLookup(lookupFrom(map[string]string{"WEBEVENT_DATABASE_URL": "postgres://db/x", "WEBEVENT_RETENTION": "5m"}))
+	if err == nil {
+		t.Fatal("retention of 5m must be rejected")
+	}
+}

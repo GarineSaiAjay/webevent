@@ -19,7 +19,7 @@ import (
 )
 
 // EnvTestDatabaseURL points at a Postgres server the tests may create and
-// drop databases on, e.g. postgres://webevent:webevent@localhost:5432/postgres
+// drop databases on, e.g. postgres://webevent:webevent@localhost:5433/postgres
 const EnvTestDatabaseURL = "WEBEVENT_TEST_DATABASE_URL"
 
 // NewDB creates a brand-new, fully migrated database for a single test and

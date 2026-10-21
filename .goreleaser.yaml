@@ -1,0 +1,46 @@
+# Release binaries for every push of a v* tag (see .github/workflows/release.yml).
+# Validate locally with: goreleaser check && goreleaser release --snapshot --clean
+version: 2
+project_name: webevent
+
+builds:
+  - id: server
+    main: ./cmd/webevent-server
+    binary: webevent-server
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{ .Version }}"]
+  - id: cli
+    main: ./cmd/webevent
+    binary: webevent
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{ .Version }}"]
+
+archives:
+  - id: server
+    ids: [server]
+    name_template: "webevent-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [LICENSE, README.md]
+  - id: cli
+    ids: [cli]
+    name_template: "webevent_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [LICENSE, README.md]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
