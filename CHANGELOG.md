@@ -4,6 +4,13 @@ All notable changes are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-10-18
+
+### Added
+
+- `webevent listen`: forward deliveries to a local server without a tunnel,
+  through listen sessions (`/v1/listen`) that expire when abandoned.
+
 ## [1.0.0] - 2026-10-18
 
 ### Added

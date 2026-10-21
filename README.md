@@ -49,19 +49,22 @@ go run ./examples/receiver -secret whsec_... -fail-rate 0.3
 
 bin/webevent events trigger user.created --data '{"id": 42}'
 bin/webevent logs --follow
+
+# Or receive webhooks on your laptop with no public URL or tunnel:
+bin/webevent listen --forward-to http://localhost:3000/webhooks
 ```
 
 ## Components
 
-| Path                  | What                                                          |
-| --------------------- | ------------------------------------------------------------- |
-| `cmd/webevent-server` | the service: HTTP API + delivery workers + retention job      |
-| `cmd/webevent`        | CLI (`endpoints`, `events`, `deliveries`, `logs`, `config`)   |
-| `pkg/client`          | Go SDK for the API (the CLI is built on it)                   |
-| `pkg/webhook`         | sign/verify helpers for **receivers** (Standard Webhooks)     |
-| `examples/receiver`   | example consumer that verifies signatures and dedupes         |
-| `tools/loadgen`       | throughput / end-to-end latency benchmark                     |
-| `deploy/`             | Kubernetes manifests, Prometheus/Grafana/Jaeger stack, alerts |
+| Path                  | What                                                                  |
+| --------------------- | --------------------------------------------------------------------- |
+| `cmd/webevent-server` | the service: HTTP API + delivery workers + retention job              |
+| `cmd/webevent`        | CLI (`endpoints`, `events`, `deliveries`, `logs`, `listen`, `config`) |
+| `pkg/client`          | Go SDK for the API (the CLI is built on it)                           |
+| `pkg/webhook`         | sign/verify helpers for **receivers** (Standard Webhooks)             |
+| `examples/receiver`   | example consumer that verifies signatures and dedupes                 |
+| `tools/loadgen`       | throughput / end-to-end latency benchmark                             |
+| `deploy/`             | Kubernetes manifests, Prometheus/Grafana/Jaeger stack, alerts         |
 
 ## Configuration
 

@@ -177,6 +177,20 @@ Every HTTP attempt across deliveries, newest first, with `event_type`,
 attempts, **oldest first**, and `next_cursor` is the next `after` value —
 this is how `webevent logs --follow` tails.
 
+## Listen sessions (used by `webevent listen`)
+
+A listen session is a temporary endpoint (`kind: "listen"`) that workers do
+not POST to; instead the CLI pulls its deliveries and forwards them to a
+local URL. Sessions are deleted when the CLI exits, or automatically after
+2 minutes without polling.
+
+| Method | Path                                  | Notes                                                                                                                                                                            |
+| ------ | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| POST   | `/v1/listen`                          | body `{"event_types":["*"]}` → `201 {"session_id","secret","event_types"}`                                                                                                       |
+| GET    | `/v1/listen/{id}/deliveries?wait=20s` | long-poll (max 25s); claims and returns up to 20 signed deliveries: `{"data":[{"delivery_id","lease_token","attempt_number","event_id","event_type","headers":{…},"body":"…"}]}` |
+| POST   | `/v1/listen/{id}/results`             | body `[{"delivery_id","lease_token","status_code","error","duration_ms","response_body"}]` → `{"recorded": n}`; normal retry policy applies                                      |
+| DELETE | `/v1/listen/{id}`                     | ends the session, cancels pending deliveries                                                                                                                                     |
+
 ## What receivers get
 
 ```http

@@ -193,6 +193,11 @@ func (p *Pool) reapLoop(ctx context.Context) {
 			p.o.Metrics.Reaped(n)
 			p.log.Warn("recovered deliveries with expired leases", "count", n)
 		}
+		if n, err := p.o.Store.ExpireListenSessions(ctx); err != nil && ctx.Err() == nil {
+			p.log.Error("expire listen sessions", "err", err)
+		} else if n > 0 {
+			p.log.Info("removed abandoned listen sessions", "count", n)
+		}
 	}
 }
 

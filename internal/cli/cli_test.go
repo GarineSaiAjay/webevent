@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"github.com/GarineSaiAjay/webevent/internal/logging"
 	"github.com/GarineSaiAjay/webevent/internal/store"
 	"github.com/GarineSaiAjay/webevent/internal/testutil"
+	"github.com/GarineSaiAjay/webevent/pkg/webhook"
 )
 
 const key = "cli-test-key-0123456789abcdefghijklmnop"
@@ -282,4 +285,91 @@ func TestReplayAndEventCommands(t *testing.T) {
 	if code != 1 || !strings.Contains(errOut, "--since") {
 		t.Fatalf("bad --since: %q", errOut)
 	}
+}
+
+func TestListenForwardsToLocalServer(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	type got struct {
+		header http.Header
+		body   []byte
+	}
+	received := make(chan got, 1)
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		received <- got{r.Header.Clone(), b}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer local.Close()
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type result struct {
+		out  string
+		code int
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, _, code := h.runCtx(runCtx, "listen", "--forward-to", local.URL+"/hooks", "--events", "order.paid")
+		done <- result{out, code}
+	}()
+
+	// Wait for the session to exist, then publish.
+	var sessionID string
+	waitUntil(t, 5*time.Second, func() bool {
+		list, _, _ := h.store.ListEndpoints(ctx, store.Page{})
+		for _, ep := range list {
+			if ep.Kind == store.KindListen {
+				sessionID = ep.ID
+				return true
+			}
+		}
+		return false
+	})
+	res, err := h.store.CreateEvent(ctx, store.NewEvent{EventType: "order.paid", Payload: []byte(`{"n":1}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var g got
+	select {
+	case g = <-received:
+	case <-time.After(10 * time.Second):
+		t.Fatal("local server never received the webhook")
+	}
+	secret, err := h.store.GetEndpointSecret(ctx, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, _ := webhook.NewVerifier(secret)
+	if err := v.Verify(g.header, g.body); err != nil {
+		t.Fatalf("forwarded request does not verify: %v", err)
+	}
+
+	waitUntil(t, 5*time.Second, func() bool {
+		d, _, _ := h.store.ListDeliveries(ctx, store.DeliveryFilter{EventID: res.Event.ID}, store.Page{})
+		return len(d) == 1 && d[0].Status == store.DeliverySucceeded
+	})
+
+	cancel() // Ctrl-C
+	r := <-done
+	if r.code != 0 || !strings.Contains(r.out, "Ready!") || !strings.Contains(r.out, "[202]") || !strings.Contains(r.out, "session closed") {
+		t.Fatalf("exit %d, output:\n%s", r.code, r.out)
+	}
+	if _, err := h.store.GetEndpoint(ctx, sessionID); err == nil {
+		t.Fatal("session must be deleted when listen exits")
+	}
+}
+
+func waitUntil(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("condition not met in time")
 }

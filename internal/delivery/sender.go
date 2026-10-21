@@ -42,6 +42,28 @@ func BuildBody(j store.Job) ([]byte, error) {
 	return json.Marshal(Envelope{ID: j.EventID, Type: j.EventType, CreatedAt: j.EventCreatedAt.UTC(), Data: j.Payload})
 }
 
+// SignedRequest builds the body and webhook headers for a job, signed at
+// time now. The worker sends them itself; for `webevent listen` the API
+// hands them to the CLI, which forwards them to a local server unchanged.
+func SignedRequest(j store.Job, now time.Time, userAgent string) (http.Header, []byte, error) {
+	if j.SecretErr != nil {
+		return nil, nil, fmt.Errorf("signing secret unavailable: %w", j.SecretErr)
+	}
+	body, err := BuildBody(j)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build body: %w", err)
+	}
+	h := http.Header{}
+	h.Set("Content-Type", "application/json")
+	h.Set("User-Agent", userAgent)
+	// webhook-id is the event id: identical across retries and replays, so
+	// receivers can use it to drop duplicates (delivery is at-least-once).
+	if err := webhook.SetHeaders(h, j.EventID, now, body, j.Secrets...); err != nil {
+		return nil, nil, fmt.Errorf("sign: %w", err)
+	}
+	return h, body, nil
+}
+
 // SenderOptions configures a Sender.
 type SenderOptions struct {
 	Timeout   time.Duration
@@ -103,24 +125,15 @@ func (s *Sender) Send(ctx context.Context, j store.Job) store.AttemptResult {
 	fail := func(msg string, permanent bool) store.AttemptResult {
 		return store.AttemptResult{Error: msg, Duration: time.Since(start), Permanent: permanent}
 	}
-	if j.SecretErr != nil {
-		return fail("signing secret unavailable: "+j.SecretErr.Error(), true)
-	}
-	body, err := BuildBody(j)
+	headers, body, err := SignedRequest(j, s.now(), s.userAgent)
 	if err != nil {
-		return fail("build body: "+err.Error(), true)
+		return fail(err.Error(), true)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, j.URL, bytes.NewReader(body))
 	if err != nil {
 		return fail("build request: "+err.Error(), true)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", s.userAgent)
-	// webhook-id is the event id: identical across retries and replays, so
-	// receivers can use it to drop duplicates (delivery is at-least-once).
-	if err := webhook.SetHeaders(req.Header, j.EventID, s.now(), body, j.Secrets...); err != nil {
-		return fail("sign: "+err.Error(), true)
-	}
+	req.Header = headers
 	// Propagate our trace (traceparent header) so receivers that use
 	// OpenTelemetry can continue it.
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))

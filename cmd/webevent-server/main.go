@@ -172,6 +172,8 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		defer func() { _ = admin.Close() }()
 	}
 
+	policy := delivery.RetryPolicy{MaxAttempts: cfg.MaxAttempts, BaseDelay: cfg.RetryBaseDelay, MaxDelay: cfg.RetryMaxDelay}
+
 	// Delivery workers run until ctx is cancelled (SIGINT/SIGTERM), then
 	// drain in-flight deliveries. API-only replicas set WEBEVENT_WORKER_ENABLED=false.
 	workerDone := make(chan struct{})
@@ -183,7 +185,7 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 				UserAgent:            "webevent/" + version,
 				AllowPrivateNetworks: cfg.AllowPrivateNetworks,
 			}),
-			Policy:               delivery.RetryPolicy{MaxAttempts: cfg.MaxAttempts, BaseDelay: cfg.RetryBaseDelay, MaxDelay: cfg.RetryMaxDelay},
+			Policy:               policy,
 			Logger:               log.With("component", "delivery"),
 			Concurrency:          cfg.WorkerConcurrency,
 			PollInterval:         cfg.WorkerPollInterval,
@@ -220,6 +222,7 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		AllowPrivateNetworks: cfg.AllowPrivateNetworks,
 		Metrics:              metrics,
 		Draining:             draining,
+		RetryPolicy:          policy,
 	})
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,

@@ -85,6 +85,7 @@ func NewRootCmd(env Env, version string) *cobra.Command {
 		newEventsCmd(a),
 		newDeliveriesCmd(a),
 		newLogsCmd(a),
+		newListenCmd(a),
 		newHealthCmd(a),
 	)
 	return root

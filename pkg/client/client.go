@@ -432,3 +432,62 @@ func (c *Client) Health(ctx context.Context) (string, error) {
 	_, err := c.do(ctx, http.MethodGet, "/healthz", nil, nil, nil, &out)
 	return out.Version, err
 }
+
+// ---- Listen sessions (webevent listen) --------------------------------------
+
+// ListenSession is a temporary endpoint served to a local developer.
+type ListenSession struct {
+	SessionID  string   `json:"session_id"`
+	Secret     string   `json:"secret"`
+	EventTypes []string `json:"event_types"`
+}
+
+// ListenDelivery is one signed delivery to forward to a local server.
+type ListenDelivery struct {
+	DeliveryID    string            `json:"delivery_id"`
+	LeaseToken    string            `json:"lease_token"`
+	AttemptNumber int               `json:"attempt_number"`
+	EventID       string            `json:"event_id"`
+	EventType     string            `json:"event_type"`
+	Headers       map[string]string `json:"headers"`
+	Body          string            `json:"body"`
+}
+
+// ListenResult reports what the local server answered.
+type ListenResult struct {
+	DeliveryID   string `json:"delivery_id"`
+	LeaseToken   string `json:"lease_token"`
+	StatusCode   int    `json:"status_code"`
+	Error        string `json:"error,omitempty"`
+	DurationMS   int    `json:"duration_ms"`
+	ResponseBody string `json:"response_body,omitempty"`
+}
+
+// StartListen opens a listen session subscribed to eventTypes (nil = all).
+func (c *Client) StartListen(ctx context.Context, eventTypes []string) (*ListenSession, error) {
+	var s ListenSession
+	_, err := c.do(ctx, http.MethodPost, "/v1/listen", nil, map[string]any{"event_types": eventTypes}, nil, &s)
+	return &s, err
+}
+
+// PollListen waits up to wait for deliveries of the session.
+func (c *Client) PollListen(ctx context.Context, sessionID string, wait time.Duration) ([]ListenDelivery, error) {
+	var out struct {
+		Data []ListenDelivery `json:"data"`
+	}
+	q := url.Values{"wait": {wait.String()}}
+	_, err := c.do(ctx, http.MethodGet, "/v1/listen/"+url.PathEscape(sessionID)+"/deliveries", q, nil, nil, &out)
+	return out.Data, err
+}
+
+// ReportListen sends forwarding results back to the server.
+func (c *Client) ReportListen(ctx context.Context, sessionID string, results []ListenResult) error {
+	_, err := c.do(ctx, http.MethodPost, "/v1/listen/"+url.PathEscape(sessionID)+"/results", nil, results, nil, nil)
+	return err
+}
+
+// StopListen deletes the session and cancels its pending deliveries.
+func (c *Client) StopListen(ctx context.Context, sessionID string) error {
+	_, err := c.do(ctx, http.MethodDelete, "/v1/listen/"+url.PathEscape(sessionID), nil, nil, nil, nil)
+	return err
+}
