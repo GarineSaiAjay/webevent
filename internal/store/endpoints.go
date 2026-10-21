@@ -24,6 +24,8 @@ type Endpoint struct {
 	Description         string    `json:"description"`
 	EventTypes          []string  `json:"event_types"`
 	Status              string    `json:"status"`
+	RateLimitPerSec     *int      `json:"rate_limit_per_sec"` // null = unlimited
+	MaxInFlight         int       `json:"max_in_flight"`
 	ConsecutiveFailures int       `json:"consecutive_failures"`
 	DisabledReason      *string   `json:"disabled_reason,omitempty"`
 	CreatedAt           time.Time `json:"created_at"`
@@ -33,28 +35,43 @@ type Endpoint struct {
 	Secret string `json:"secret,omitempty"`
 }
 
+// DefaultMaxInFlight is used when an endpoint does not specify one.
+const DefaultMaxInFlight = 10
+
 // NewEndpoint is the input to CreateEndpoint. It must already be validated.
 type NewEndpoint struct {
-	URL         string
-	Description string
-	EventTypes  []string
+	URL             string
+	Description     string
+	EventTypes      []string
+	RateLimitPerSec *int // nil or 0 = unlimited
+	MaxInFlight     int  // 0 = DefaultMaxInFlight
 }
 
 // EndpointPatch holds optional changes; nil fields are left untouched.
 type EndpointPatch struct {
-	URL         *string
-	Description *string
-	EventTypes  *[]string
-	Status      *string
+	URL             *string
+	Description     *string
+	EventTypes      *[]string
+	Status          *string
+	RateLimitPerSec *int // 0 removes the limit
+	MaxInFlight     *int
 }
 
-const endpointColumns = `id, url, description, event_types, status, consecutive_failures, disabled_reason, created_at, updated_at`
+const endpointColumns = `id, url, description, event_types, status, rate_limit_per_sec, max_in_flight,
+	consecutive_failures, disabled_reason, created_at, updated_at`
 
 func scanEndpoint(row pgx.CollectableRow) (Endpoint, error) {
 	var e Endpoint
-	err := row.Scan(&e.ID, &e.URL, &e.Description, &e.EventTypes, &e.Status, &e.ConsecutiveFailures,
-		&e.DisabledReason, &e.CreatedAt, &e.UpdatedAt)
+	err := row.Scan(&e.ID, &e.URL, &e.Description, &e.EventTypes, &e.Status, &e.RateLimitPerSec, &e.MaxInFlight,
+		&e.ConsecutiveFailures, &e.DisabledReason, &e.CreatedAt, &e.UpdatedAt)
 	return e, err
+}
+
+func rateLimitValue(r *int) *int {
+	if r == nil || *r == 0 {
+		return nil
+	}
+	return r
 }
 
 // CreateEndpoint inserts a new endpoint with a freshly generated signing
@@ -65,11 +82,15 @@ func (s *Store) CreateEndpoint(ctx context.Context, in NewEndpoint) (Endpoint, e
 	if err != nil {
 		return Endpoint{}, err
 	}
+	maxInFlight := in.MaxInFlight
+	if maxInFlight == 0 {
+		maxInFlight = DefaultMaxInFlight
+	}
 	rows, err := s.pool.Query(ctx, `
-		INSERT INTO endpoints (id, url, description, event_types, secret)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO endpoints (id, url, description, event_types, secret, rate_limit_per_sec, max_in_flight)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING `+endpointColumns,
-		id.New(id.PrefixEndpoint), in.URL, in.Description, in.EventTypes, sealed)
+		id.New(id.PrefixEndpoint), in.URL, in.Description, in.EventTypes, sealed, rateLimitValue(in.RateLimitPerSec), maxInFlight)
 	if err != nil {
 		return Endpoint{}, err
 	}
@@ -154,10 +175,15 @@ func (s *Store) UpdateEndpoint(ctx context.Context, endpointID string, p Endpoin
 			event_types          = COALESCE($4, event_types),
 			status               = COALESCE($5, status),
 			consecutive_failures = CASE WHEN $5::text IS NULL THEN consecutive_failures ELSE 0 END,
-			disabled_reason      = CASE WHEN $5::text IS NULL THEN disabled_reason ELSE NULL END
+			disabled_reason      = CASE WHEN $5::text IS NULL THEN disabled_reason ELSE NULL END,
+			rate_limit_per_sec   = CASE WHEN $6::int IS NULL THEN rate_limit_per_sec
+			                            WHEN $6 = 0 THEN NULL ELSE $6 END,
+			-- A new limit starts with a full bucket.
+			rl_tokens            = CASE WHEN $6::int IS NULL THEN rl_tokens ELSE NULL END,
+			max_in_flight        = COALESCE($7, max_in_flight)
 		WHERE id = $1 AND deleted_at IS NULL
 		RETURNING `+endpointColumns,
-		endpointID, p.URL, p.Description, p.EventTypes, p.Status)
+		endpointID, p.URL, p.Description, p.EventTypes, p.Status, p.RateLimitPerSec, p.MaxInFlight)
 	if err != nil {
 		return Endpoint{}, err
 	}
