@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/GarineSaiAjay/webevent/internal/observability"
 	"github.com/GarineSaiAjay/webevent/internal/store"
 )
 
@@ -19,6 +20,8 @@ type Options struct {
 	// AllowPrivateNetworks accepts endpoint URLs pointing at private or
 	// loopback IP literals (development only).
 	AllowPrivateNetworks bool
+	// Metrics may be nil.
+	Metrics *observability.Metrics
 }
 
 // Server holds handler dependencies.
@@ -28,6 +31,7 @@ type Server struct {
 	auth         *apiKeyAuth
 	version      string
 	allowPrivate bool
+	metrics      *observability.Metrics
 }
 
 // New builds the API and returns its root handler.
@@ -39,6 +43,7 @@ func New(opts Options) http.Handler {
 		version: opts.Version,
 
 		allowPrivate: opts.AllowPrivateNetworks,
+		metrics:      opts.Metrics,
 	}
 
 	// Unauthenticated operational routes.
@@ -67,7 +72,7 @@ func New(opts Options) http.Handler {
 
 	mux.HandleFunc("/", s.handleNoRoute)
 
-	return chain(mux, requestID, recoverer(s.log), accessLog(s.log))
+	return chain(mux, requestID, observe(s.log, s.metrics), recoverer(s.log))
 }
 
 func (s *Server) handleNoRoute(w http.ResponseWriter, r *http.Request) {

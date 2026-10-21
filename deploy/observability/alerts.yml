@@ -1,0 +1,59 @@
+groups:
+  - name: webevent
+    rules:
+      # The single most important alert: work is waiting longer and longer.
+      - alert: WebeventDeliveriesFallingBehind
+        expr: max(webevent_queue_oldest_due_seconds) > 300
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: Deliveries have been waiting more than 5 minutes
+          description: >
+            The oldest due delivery has waited {{ $value | humanizeDuration }}.
+            Workers are down, stuck, or under-provisioned. Check
+            webevent_deliveries_in_flight, worker logs and database health.
+
+      - alert: WebeventNoDeliveryWorkers
+        expr: absent(up{job="webevent"} == 1)
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: No webevent instance is being scraped
+
+      - alert: WebeventHighDeadLetterRate
+        expr: |
+          sum(rate(webevent_delivery_attempts_total{outcome="dead"}[15m]))
+            / clamp_min(sum(rate(webevent_delivery_attempts_total[15m])), 1e-9) > 0.05
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: More than 5% of delivery attempts end in the dead-letter state
+
+      - alert: WebeventEndpointsAutoDisabled
+        expr: increase(webevent_endpoints_disabled_total[1h]) > 0
+        labels: { severity: ticket }
+        annotations:
+          summary: An endpoint was automatically disabled after repeated failures
+
+      - alert: WebeventLeasesExpiring
+        expr: increase(webevent_leases_reaped_total[15m]) > 0
+        labels: { severity: ticket }
+        annotations:
+          summary: Deliveries were recovered from crashed or stalled workers
+          description: Expect duplicate deliveries for these; investigate restarts/OOM kills.
+
+      - alert: WebeventAPIErrors
+        expr: |
+          sum(rate(webevent_http_requests_total{code=~"5.."}[5m]))
+            / clamp_min(sum(rate(webevent_http_requests_total[5m])), 1e-9) > 0.01
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: More than 1% of API requests fail with 5xx
+
+      - alert: WebeventSlowClaims
+        expr: histogram_quantile(0.99, sum by (le) (rate(webevent_claim_duration_seconds_bucket[5m]))) > 0.5
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: p99 claim transaction above 500ms (database contention or missing index)

@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/GarineSaiAjay/webevent/internal/id"
+	"github.com/GarineSaiAjay/webevent/internal/observability"
 	"github.com/GarineSaiAjay/webevent/internal/store"
 )
 
@@ -71,7 +72,10 @@ func (s *Server) handleCreateEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res, err := s.store.CreateEvent(r.Context(), store.NewEvent{
-		EventType: req.EventType, Payload: trimmed, IdempotencyKey: key,
+		EventType:      req.EventType,
+		Payload:        trimmed,
+		IdempotencyKey: key,
+		TraceParent:    observability.TraceParentFrom(r.Context()),
 	})
 	if errors.Is(err, store.ErrIdempotencyMismatch) {
 		err = errConflict("Idempotency-Key was already used with a different request body")
@@ -82,6 +86,9 @@ func (s *Server) handleCreateEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	status := http.StatusAccepted
+	if !res.Replayed {
+		s.metrics.EventIngested(res.DeliveryCount)
+	}
 	if res.Replayed {
 		w.Header().Set("Idempotent-Replayed", "true")
 		status = http.StatusOK

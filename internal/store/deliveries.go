@@ -146,6 +146,9 @@ type Job struct {
 	// SecretErr is set when a secret could not be decrypted; the attempt
 	// must fail permanently rather than be sent unsigned.
 	SecretErr error
+	// TraceParent links the delivery span to the request that created the
+	// event ("" if that request was not traced).
+	TraceParent string
 }
 
 // AttemptResult is what happened when a worker sent a job.

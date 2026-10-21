@@ -31,6 +31,7 @@ type NewEvent struct {
 	EventType      string
 	Payload        json.RawMessage
 	IdempotencyKey string // optional
+	TraceParent    string // optional W3C traceparent of the creating request
 }
 
 // CreateEventResult reports what CreateEvent did.
@@ -78,11 +79,11 @@ func (s *Store) CreateEvent(ctx context.Context, in NewEvent) (CreateEventResult
 
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
-			INSERT INTO events (id, event_type, payload, idempotency_key, request_hash)
-			VALUES ($1, $2, $3, $4, $5)
+			INSERT INTO events (id, event_type, payload, idempotency_key, request_hash, trace_parent)
+			VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
 			RETURNING `+eventColumns,
-			id.New(id.PrefixEvent), in.EventType, in.Payload, key, hash)
+			id.New(id.PrefixEvent), in.EventType, in.Payload, key, hash, nullIfEmpty(in.TraceParent))
 		if err != nil {
 			return err
 		}

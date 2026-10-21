@@ -16,6 +16,7 @@ import (
 // Config is the complete, validated runtime configuration.
 type Config struct {
 	HTTPAddr        string
+	AdminAddr       string // internal-only: /metrics and /debug/pprof ("off" disables)
 	DatabaseURL     string
 	DBMaxConns      int32
 	LogLevel        slog.Level
@@ -56,6 +57,7 @@ func FromLookup(lookup func(string) (string, bool)) (Config, error) {
 	r := reader{lookup: lookup}
 	cfg := Config{
 		HTTPAddr:        r.str("WEBEVENT_HTTP_ADDR", ":8080"),
+		AdminAddr:       r.str("WEBEVENT_ADMIN_ADDR", ":9090"),
 		DatabaseURL:     r.str("WEBEVENT_DATABASE_URL", ""),
 		DBMaxConns:      int32(r.int("WEBEVENT_DB_MAX_CONNS", 20)),
 		LogLevel:        r.level("WEBEVENT_LOG_LEVEL", slog.LevelInfo),
