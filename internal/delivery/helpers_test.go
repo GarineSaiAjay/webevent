@@ -101,7 +101,7 @@ func newPool(t *testing.T, st *store.Store, c poolConfig) *delivery.Pool {
 	}
 	p, err := delivery.NewPool(delivery.PoolOptions{
 		Store:                st,
-		Sender:               delivery.NewSender(5*time.Second, "webevent-test"),
+		Sender:               delivery.NewSender(delivery.SenderOptions{Timeout: 5 * time.Second, UserAgent: "webevent-test", AllowPrivateNetworks: true}),
 		Policy:               c.policy,
 		Logger:               logging.Discard(),
 		Concurrency:          c.concurrency,

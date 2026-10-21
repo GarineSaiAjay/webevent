@@ -11,6 +11,7 @@ import (
 
 	"github.com/GarineSaiAjay/webevent/internal/delivery"
 	"github.com/GarineSaiAjay/webevent/internal/store"
+	"github.com/GarineSaiAjay/webevent/pkg/webhook"
 )
 
 func TestDeliversEvent(t *testing.T) {
@@ -308,5 +309,49 @@ func TestDeleteDuringFlightIsNotOverwritten(t *testing.T) {
 	attempts, _ := st.ListAttempts(ctx, d.ID)
 	if len(attempts) != 1 {
 		t.Fatal("the attempt must still be logged")
+	}
+}
+
+func TestRotationSignsWithBothSecrets(t *testing.T) {
+	st := newStore(t)
+	p := newPool(t, st, poolConfig{})
+	ctx := context.Background()
+	rcv, srv := newReceiver(t)
+	ep, err := st.CreateEndpoint(ctx, store.NewEndpoint{URL: srv.URL, EventTypes: []string{"*"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSecret := ep.Secret
+	newSecret, err := st.RotateEndpointSecret(ctx, ep.ID, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateEvent(ctx, store.NewEvent{EventType: "a.b", Payload: json.RawMessage(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for name, secret := range map[string]string{"old": oldSecret, "new": newSecret} {
+		v, _ := webhook.NewVerifier(secret)
+		if err := v.Verify(rcv.requests[0].Header, rcv.bodies[0]); err != nil {
+			t.Errorf("%s secret does not verify during grace period: %v", name, err)
+		}
+	}
+
+	// Rotating again with no grace period revokes the old one immediately.
+	newest, _ := st.RotateEndpointSecret(ctx, ep.ID, 0)
+	if _, err := st.CreateEvent(ctx, store.NewEvent{EventType: "a.b", Payload: json.RawMessage(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if sigs := strings.Fields(rcv.requests[1].Header.Get(webhook.HeaderSignature)); len(sigs) != 1 {
+		t.Fatalf("want exactly one signature after immediate rotation, got %d", len(sigs))
+	}
+	v, _ := webhook.NewVerifier(newest)
+	if err := v.Verify(rcv.requests[1].Header, rcv.bodies[1]); err != nil {
+		t.Fatal(err)
 	}
 }

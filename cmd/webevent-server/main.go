@@ -24,6 +24,7 @@ import (
 	"github.com/GarineSaiAjay/webevent/internal/db"
 	"github.com/GarineSaiAjay/webevent/internal/delivery"
 	"github.com/GarineSaiAjay/webevent/internal/logging"
+	"github.com/GarineSaiAjay/webevent/internal/secrets"
 	"github.com/GarineSaiAjay/webevent/internal/store"
 )
 
@@ -96,15 +97,29 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		}
 	}
 
-	st := store.New(pool)
+	box, err := secrets.NewBox(cfg.SecretKey)
+	if err != nil {
+		return fmt.Errorf("WEBEVENT_SECRET_KEY: %w", err)
+	}
+	if !box.Encrypting() {
+		log.Warn("WEBEVENT_SECRET_KEY is not set: endpoint signing secrets are stored unencrypted")
+	}
+	if cfg.AllowPrivateNetworks {
+		log.Warn("WEBEVENT_ALLOW_PRIVATE_NETWORKS is on: SSRF protection is disabled (development only)")
+	}
+	st := store.New(pool, store.WithSecretBox(box))
 
 	// Delivery workers run until ctx is cancelled (SIGINT/SIGTERM), then
 	// drain in-flight deliveries. API-only replicas set WEBEVENT_WORKER_ENABLED=false.
 	workerDone := make(chan struct{})
 	if cfg.WorkerEnabled {
 		workers, err := delivery.NewPool(delivery.PoolOptions{
-			Store:                st,
-			Sender:               delivery.NewSender(cfg.DeliveryTimeout, "webevent/"+version),
+			Store: st,
+			Sender: delivery.NewSender(delivery.SenderOptions{
+				Timeout:              cfg.DeliveryTimeout,
+				UserAgent:            "webevent/" + version,
+				AllowPrivateNetworks: cfg.AllowPrivateNetworks,
+			}),
 			Policy:               delivery.RetryPolicy{MaxAttempts: cfg.MaxAttempts, BaseDelay: cfg.RetryBaseDelay, MaxDelay: cfg.RetryMaxDelay},
 			Logger:               log.With("component", "delivery"),
 			Concurrency:          cfg.WorkerConcurrency,
@@ -125,7 +140,13 @@ func serve(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		close(workerDone)
 	}
 
-	handler := api.New(api.Options{Logger: log, Store: st, APIKeys: cfg.APIKeys, Version: version})
+	handler := api.New(api.Options{
+		Logger:               log,
+		Store:                st,
+		APIKeys:              cfg.APIKeys,
+		Version:              version,
+		AllowPrivateNetworks: cfg.AllowPrivateNetworks,
+	})
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,

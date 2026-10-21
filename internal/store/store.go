@@ -7,6 +7,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/GarineSaiAjay/webevent/internal/secrets"
 )
 
 // ErrNotFound is returned when a row does not exist. Callers use errors.Is.
@@ -15,10 +17,26 @@ var ErrNotFound = errors.New("not found")
 // Store wraps the connection pool.
 type Store struct {
 	pool *pgxpool.Pool
+	box  *secrets.Box
 }
 
-// New returns a Store backed by pool.
-func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
+// Option customises a Store.
+type Option func(*Store)
+
+// WithSecretBox encrypts endpoint signing secrets at rest with box.
+func WithSecretBox(box *secrets.Box) Option {
+	return func(s *Store) { s.box = box }
+}
+
+// New returns a Store backed by pool. Without WithSecretBox, signing
+// secrets are stored in plaintext.
+func New(pool *pgxpool.Pool, opts ...Option) *Store {
+	s := &Store{pool: pool, box: &secrets.Box{}}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
+}
 
 // Pool exposes the underlying pool for health checks.
 func (s *Store) Pool() *pgxpool.Pool { return s.pool }

@@ -7,9 +7,12 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/GarineSaiAjay/webevent/internal/db"
 	"github.com/GarineSaiAjay/webevent/internal/logging"
 	"github.com/GarineSaiAjay/webevent/internal/testutil"
+	"github.com/GarineSaiAjay/webevent/pkg/webhook"
 )
 
 func TestLoadMigrationsSortsAndValidates(t *testing.T) {
@@ -111,5 +114,52 @@ func TestFailedMigrationRollsBack(t *testing.T) {
 	}
 	if exists {
 		t.Fatal("table from failed migration should have been rolled back")
+	}
+}
+
+// TestSigningSecretBackfill checks that migration 0006 gives endpoints that
+// existed before it a valid, unique signing secret.
+func TestSigningSecretBackfill(t *testing.T) {
+	pool := testutil.NewEmptyDB(t)
+	ctx := context.Background()
+	migs, err := db.Migrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before, after []db.Migration
+	for _, m := range migs {
+		if m.Version < 6 {
+			before = append(before, m)
+		} else {
+			after = append(after, m)
+		}
+	}
+	if err := db.Migrate(ctx, pool, before, logging.Discard()); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"ep_a", "ep_b"} {
+		if _, err := pool.Exec(ctx, `INSERT INTO endpoints (id, url, event_types) VALUES ($1, 'https://x.example', '{*}')`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Migrate(ctx, pool, append(before, after...), logging.Discard()); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := pool.Query(ctx, `SELECT secret FROM endpoints ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretList, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secretList) != 2 || secretList[0] == secretList[1] {
+		t.Fatalf("secrets = %v", secretList)
+	}
+	for _, s := range secretList {
+		key, err := webhook.DecodeSecret(s)
+		if err != nil || len(key) != 32 {
+			t.Fatalf("backfilled secret %q invalid: %v (len %d)", s, err, len(key))
+		}
 	}
 }
