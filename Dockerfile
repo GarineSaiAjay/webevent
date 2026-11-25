@@ -4,7 +4,7 @@
 # Build on the runner's native platform and cross-compile for the target:
 # much faster than emulating arm64 with QEMU.
 # Keep this tag in step with the "go" line in go.mod.
-FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine AS build
 WORKDIR /src
 
 # Dependencies first: this layer is cached until go.mod/go.sum change.
